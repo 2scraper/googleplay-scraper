@@ -1,0 +1,4 @@
+# The primary engine.
+#   pip install -r requirements.txt -r requirements-playwright.txt
+#   playwright install chromium
+playwright>=1.44

@@ -1,0 +1,3 @@
+# The Selenium mirror. Selenium Manager fetches a matching chromedriver.
+#   pip install -r requirements.txt -r requirements-selenium.txt
+selenium>=4.20

@@ -1,0 +1,3 @@
+# Core. Install exactly one engine file beside this one.
+beautifulsoup4>=4.12
+requests>=2.31

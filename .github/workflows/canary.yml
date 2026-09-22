@@ -1,0 +1,195 @@
+# One real run against play.google.com, every morning.
+#
+# `tests.yml` deliberately never touches the site; this is the job that does.
+#
+# It carries NO SECRETS AND IS EXPECTED TO BE GREEN, and that is the whole
+# design. The README's central claim is "no key, no proxy, no account", and
+# the only honest way to keep a sentence like that true is to run it daily
+# from an address nobody controls — a bare GitHub runner — and let the badge
+# go red the morning it stops being true.
+#
+# A canary that CANNOT pass must skip rather than fail (a check that is always
+# red teaches everyone to ignore checks). The other half of that rule applies
+# here: a canary that CAN pass without a credential must never be gated on
+# one, or it goes green every day while testing nothing.
+#
+# Measured 2026-09-22 from a datacentre address, and re-measured by this job
+# from GitHub's: every route below answers without a key.
+
+name: canary
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  listing:
+    name: a real 3-page listing run
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      - name: run
+        id: run
+        run: |
+          # `set +e` because a non-zero exit aborts the step BEFORE the echo
+          # that records it — `continue-on-error` does not change that, it
+          # stops the step failing the job rather than stopping errexit.
+          set +e
+          python3 playwright_scraper.py \
+            --mode listing --category TOOLS --pages 3 \
+            --format json --out canary --dump-html canary_page
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: assert
+        run: |
+          python3 - <<'PY'
+          import json, os, sys
+
+          rc = int("${{ steps.run.outputs.exit_code }}")
+          meta = json.load(open("canary.meta.json"))
+          rows = json.load(open("canary.json"))
+
+          def require(label, condition, detail=""):
+              print(("ok   " if condition else "FAIL ") + label +
+                    (f" — {detail}" if detail else ""))
+              return condition
+
+          ok = True
+          # Exit 5 is a DEFECT here, not an access condition. Sibling repos
+          # warn on it because their canaries use a remote API whose
+          # credential expires; this one uses none, so "the content was never
+          # obtained" from a bare runner means something really broke.
+          ok &= require("exit code is 0", rc == 0, f"got {rc}")
+          ok &= require("status is complete", meta["status"] == "complete",
+                        meta["status"])
+          # Three pages, because with one page pagination is never exercised —
+          # which is exactly how a silent single-page bug survived in this
+          # family.
+          ok &= require("three pages were fetched",
+                        meta["pages_completed"] >= 3,
+                        str(meta["pages_completed"]))
+          # A floor, not a fraction: which shelves a category page publishes
+          # varies between fetches, so a fraction here would go stale on its
+          # own. 40 is comfortably under the 52-54 measured on 2026-09-22 and
+          # comfortably over "something is broken".
+          ok &= require("a floor of rows", len(rows) >= 40, str(len(rows)))
+          priced = [r for r in rows if r["price"] is not None]
+          ok &= require("nearly every row carries a price",
+                        len(priced) >= len(rows) * 0.9,
+                        f"{len(priced)}/{len(rows)}")
+          ok &= require("every row has a package id",
+                        all(r["sku"] and "." in r["sku"] for r in rows))
+          ok &= require("package ids are unique",
+                        len({r["sku"] for r in rows}) == len(rows))
+          ok &= require("every row records its market",
+                        all(r["gl"] == "US" and r["hl"] == "en" for r in rows))
+          # The store publishes no exact install count on a listing route.
+          # If this ever starts failing, Play has changed what a tile carries
+          # and the README's measurement needs re-taking.
+          ok &= require("no listing row claims an exact install count",
+                        all(r["installs_exact"] is None for r in rows))
+          rated = [r for r in rows if r["rating"] is not None]
+          ok &= require("most rows carry a rating",
+                        len(rated) >= len(rows) * 0.7,
+                        f"{len(rated)}/{len(rows)}")
+          sys.exit(0 if ok else 1)
+          PY
+
+      - name: artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-listing
+          path: |
+            canary.json
+            canary.meta.json
+            canary_page_*.html
+          retention-days: 7
+
+  reviews:
+    name: a real reviews run
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-playwright.txt
+          playwright install --with-deps chromium
+
+      - name: run
+        id: run
+        run: |
+          set +e
+          # --no-authors on purpose: a scheduled job has no business uploading
+          # real people's names and profile ids into a public artefact.
+          python3 playwright_scraper.py \
+            --mode reviews --app-id com.whatsapp --pages 2 \
+            --reviews-per-call 100 --no-authors \
+            --format json --out canary_reviews
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: assert
+        run: |
+          python3 - <<'PY'
+          import json, sys
+          rc = int("${{ steps.run.outputs.exit_code }}")
+          rows = json.load(open("canary_reviews.json"))
+          meta = json.load(open("canary_reviews.meta.json"))
+
+          def require(label, condition, detail=""):
+              print(("ok   " if condition else "FAIL ") + label +
+                    (f" — {detail}" if detail else ""))
+              return condition
+
+          ok = True
+          ok &= require("exit code is 0", rc == 0, f"got {rc}")
+          ok &= require("status is complete", meta["status"] == "complete",
+                        meta["status"])
+          # Page 1 is embedded in the app page and page 2 comes from
+          # batchexecute, so clearing 100 rows proves BOTH routes worked.
+          ok &= require("both review routes produced rows", len(rows) >= 100,
+                        str(len(rows)))
+          ok &= require("review ids are unique",
+                        len({r["review_id"] for r in rows}) == len(rows))
+          ok &= require("scores are real stars",
+                        all(r["score"] in (1, 2, 3, 4, 5) for r in rows))
+          ok &= require("dates parsed",
+                        all(r["posted_at"] and r["posted_at"].startswith("20")
+                            for r in rows))
+          # --no-authors must have dropped ALL THREE personal fields.
+          ok &= require("no personal material in the artefact",
+                        all(r["author_name"] is None and r["author_id"] is None
+                            and r["author_image"] is None for r in rows))
+          sys.exit(0 if ok else 1)
+          PY
+
+      - name: artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canary-reviews
+          path: |
+            canary_reviews.json
+            canary_reviews.meta.json
+          retention-days: 7
