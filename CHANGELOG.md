@@ -89,6 +89,13 @@ None of these is a limitation of the store, and each is stated as what it is:
 
 - `EXIT_USAGE = 2` in `output_writer.py`. The family's contract has always
   had this code and no repo in it had a name for it.
+- A run with failed pages now reports `partial` and exit 6, not `complete`
+  and exit 0. `finish_run` decided completeness from `stop_reason` alone, and
+  a named list of reasons cannot cover a failure recorded somewhere else —
+  `pages_failed` is somewhere else — so a sidecar could say `status:
+  complete` with a non-empty `pages_failed` in the same file. Landed here as
+  part of a family-wide fix measured across 32 repos by CALLING each one's
+  `finish_run` rather than grepping for it.
 
 [Unreleased]: https://github.com/2scraper/googleplay-scraper/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/2scraper/googleplay-scraper/releases/tag/v0.1.0
