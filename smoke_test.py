@@ -255,6 +255,14 @@ def test_grid_values():
                 "measured: 0 of 330 listing tiles publish one")
     ok &= check("[grid] a listing row carries no histogram",
                 all(r.histogram_5 is None for r in rows))
+    # Pinned because the README said the opposite until a fresh clone was run
+    # the way a stranger runs it, and the first row it printed had a null
+    # here. A grid tile publishes the genre only as display text.
+    ok &= check("[grid] a listing row carries no genre key",
+                all(r.genre_id is None for r in rows),
+                "the tile has no locale-independent key anywhere in it")
+    ok &= check("[grid] but it does carry the displayed genre",
+                all(r.category for r in rows))
     ok &= check("[grid] rating is populated on a US grid",
                 sum(1 for r in rows if r.rating is not None) == len(rows))
     return ok

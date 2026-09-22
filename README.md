@@ -226,9 +226,13 @@ night's good output is still there.
 * **A package id that does not exist gives exit 4, not exit 3.** Play answers
   it with a clean HTTP 404, and this scraper calls that `not_found` — an
   answer, not a refusal. Check the id before you check your proxy.
-* **The genre name changes with the language and the key does not.** Join
-  cross-market data on `genre_id` (`COMMUNICATION`), never on `category`
-  ("Kommunikation").
+* **`genre_id` is null on every listing row, and that is the store.** A grid
+  tile publishes the genre only as display text ("Casual", "Arcade") — it
+  carries no locale-independent key at all, measured across the capture set.
+  The key arrives on `--mode app`. So a cross-market join is on `sku`, which
+  is stable everywhere; `genre_id` is for comparing app rows, and `category`
+  is display text that changes with `--hl` ("Kommunikation" for
+  "Communication") and must not be joined on.
 * **`brand` is the developer, not the seller.** The store's own payload holds
   a seller-of-record beside the developer, and in the EU it says "Google
   Commerce Ltd". This reads the developer on every market. If you see

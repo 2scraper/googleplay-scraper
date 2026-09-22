@@ -156,8 +156,17 @@ class App:
     # a numeric id (`5700313618786177705`) and a name — and both address the
     # same grid; whichever the page carried is what lands here.
     developer_id: Optional[str] = None
-    # The locale-independent genre key ("GAME_ARCADE"). This is what a
-    # cross-market join uses.
+    # The locale-independent genre key ("GAME_ARCADE").
+    #
+    # App route ONLY. A grid tile publishes the genre as display text and
+    # carries no key anywhere in its record — measured across the capture set
+    # — so this is null on every listing, search and developer row by the
+    # store's design rather than by a missing read. It is deliberately NOT
+    # filled in from the `--category` the run was given: that is the category
+    # somebody asked for, not the genre the store assigns the app, and
+    # writing one through as the other would present a guess as a fact.
+    #
+    # A cross-market join is on `sku`, which is stable on every route.
     genre_id: Optional[str] = None
     # The install count exactly as displayed ("1,000,000,000+") and the
     # integer floor it states. Play publishes no exact figure on any route
