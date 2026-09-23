@@ -11,6 +11,38 @@ discovered from a bill or a diff.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`diff_runs.py` told users Google Play "prices everything in JPY for every
+  visitor".** That text, and the `--price-tolerance-pct` help, came from the
+  repo this one was ported from; Play prices per market. A currency mismatch
+  between two runs is now explained as two different `--gl` markets.
+  `TRACKED_FIELDS` / `PRICE_FIELDS` no longer name columns this schema does
+  not have (`points`, `price_max`, `shipping_fee`, ...).
+- **`scraper_api_client.py` could never report a block.** It compared the
+  `(state, reason)` tuple from `detect_page_state` to `"blocked"`, which never
+  matches. Its docstring, `--help` and error messages also described another
+  site (45 products, a 43-byte Akamai deny, `?p=N`, "these pages DO need
+  JavaScript"). They now say this path has not been run on Google Play yet.
+- **Issue templates and CONTRIBUTING.md described another site** (payload
+  keys, JPY rate-limit page, EUC-JP, sponsored slots, a 6,750-result cap).
+  Rewritten from this repo's README and `product_parser.py`. The broken
+  TROUBLESHOOTING.md links now point at the README.
+- Donor prose removed from `captcha_solver.py`, `output_writer.py`,
+  `env_config.py`, `fingerprint_client.py`, `SECURITY.md` and
+  `.github/ci_checks.py`. The lessons that came from siblings now name the
+  sibling. `ci_checks.py` no longer says the captures live outside the repo.
+  They are committed here, scrubbed.
+- `.gitignore` / `.dockerignore` ignored another repo's output prefix
+  (`dubizzle_listings.*`). They now ignore this repo's own `googleplay_apps.*`.
+  A `!fixtures_generated.json` exception for a file this repo does not have
+  was removed, and the Dockerfile example no longer writes `/out/coffee`.
+
+- `SECURITY.md` said this project has no releases or version tags; it has
+  both. "Supported versions" now names the latest release and `main`.
+- `captcha_solver.py`'s docstring pointed at a "No DataDome solver" section
+  that does not exist in this repo (it came with the copied core). Removed.
+
 ## [0.1.0] — 2026-09-22
 
 First release. Five modes, four back ends, and one row schema shared with the

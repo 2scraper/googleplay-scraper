@@ -8,15 +8,15 @@ the identifier the README already tells people to diff on for price
 monitoring and assortment tracking, but that nothing in this repo actually
 computed.
 
-    python3 diff_runs.py --old watches.2026-09-01.json \\
-                          --new watches.2026-09-07.json
+    python3 diff_runs.py --old games.2026-09-01.json \\
+                          --new games.2026-09-07.json
 
 Typical use is a scheduled re-run of one of the four scraper engines, kept
 under a dated filename, diffed against the previous one:
 
-    python3 playwright_scraper.py --url "$URL" --out "girls_$(date +%F)"
-    python3 diff_runs.py --old "girls_$(ls -t girls_*.json | sed -n 2p)" \\
-                          --new "girls_$(date +%F).json" --out diff.json
+    python3 playwright_scraper.py --url "$URL" --out "games_$(date +%F)"
+    python3 diff_runs.py --old "games_$(ls -t games_*.json | sed -n 2p)" \\
+                          --new "games_$(date +%F).json" --out diff.json
 
 Four buckets, each keyed on sku:
 
@@ -46,41 +46,21 @@ from typing import Dict, List, Optional, Tuple
 
 from output_writer import UNIQUE_BY_SKU_MODES
 
-# What a price monitor on Google Play actually needs to watch, which is more
-# than the price.
-#
-# `points` and `point_rate` are in here and that is the Google Play-specific
-# decision worth explaining: a 10x point campaign on this marketplace is
-# effectively a 10% discount that never touches the price column. A monitor
-# watching `price` alone would call a product unchanged through the whole of
-# a Super Sale. `points` was non-null on 405 of 405 measured rows, so it is
-# a column that reliably carries the signal.
-#
-# `price_max` is here because 95 of 405 rows are a RANGE — an item whose
-# variants differ — so a change in the top of the range is a real price
-# change that the bottom of it can hide. `subscription_price` likewise: it is
-# a different offer on the same product (54 of 405 rows), always below
-# `price`, and a shop can move it on its own.
+# What a price monitor on Google Play watches: the family's price columns
+# and `in_stock`, all of which an `App` row carries.
 #
 # NOT tracked: `rating` and `review_count`, which drift upwards constantly
-# and would make every diff noisy, and `genre_rank`, which is the item's
-# standing in a listing this run never fetched.
+# and would make every diff noisy — two runs of one popular app minutes
+# apart already differ on every counter (see the README's "Traps").
 TRACKED_FIELDS = ("price", "original_price", "discount_pct", "currency",
-                  "price_max", "subscription_price", "points", "point_rate",
-                  "shipping_fee", "free_shipping", "in_stock")
+                  "in_stock")
 
 # The subset of TRACKED_FIELDS whose comparability depends on price_source
-# matching between the two runs — see diff_products.
-#
-# All five money columns are in it, and on this site that guard earns its
-# keep across MODES rather than across rendering states: a listing row
-# (`price_source: "state"`) publishes no was-price at all while a product row
-# (`"itemdata"`) publishes one where Google Play's own verification flag allows
-# it. So diffing a listing run against a product run would otherwise report
-# a discount appearing on every product in the file, and not one of those
-# would be a price change.
-PRICE_FIELDS = ("price", "original_price", "discount_pct", "price_max",
-                "subscription_price")
+# matching between the two runs — see diff_products. A listing row
+# (`price_source: "listing"`) and an app row (`"detail"` / `"detail+jsonld"`)
+# read the price from different payloads, so a difference between them is
+# about the route, not about the store.
+PRICE_FIELDS = ("price", "original_price", "discount_pct")
 
 
 def _load(path: str) -> List[dict]:
@@ -114,11 +94,8 @@ def _within_tolerance(before: dict, after: dict, changes: dict,
     Inherited from this family rather than earned here, and said plainly
     because the alternative is a comment inventing a reason. A sibling repo
     needs it: that site converts prices for a cross-border visitor and the
-    exchange rate ticks between two runs of the same command. NO EQUIVALENT
-    THIS SITE'S BEHAVIOUR WAS MEASURED, and it makes this flag doubly
-    unnecessary here: the site prices everything in JPY for every visitor,
-    so a run holds no conversion drift to absorb, AND the yen has no
-    subunit, so every price is a whole number with no rounding tick either.
+    exchange rate ticks between two runs of the same command. No such drift
+    has been measured on this site.
 
     So the flag stays available and DEFAULTS TO ZERO, which makes it inert
     unless someone deliberately asks for it. Set it to something non-zero
@@ -155,13 +132,9 @@ def diff_products(old: List[dict], new: List[dict],
     # NO `lifecycle` bucket, and its absence is a decision with a reason
     # rather than an omission. A sibling repo needs one because its site
     # rotates ads in and out of a promoted slot that appears in the rows, so
-    # a placement move would otherwise read as a price change. Google Play also
-    # sells placement — 7 of 52 payload entries on one measured page — but
-    # those sponsored entries never become rows at all: they carry a
-    # click-tracking redirect instead of a product URL and `parse_products`
-    # drops them. So there is no placement column for a lifecycle bucket to
-    # key on, and porting one would be dead code that looks load-bearing
-    # (§4).
+    # a placement move would otherwise read as a price change. No placement
+    # column exists here for such a bucket to key on, and porting one would
+    # be dead code that looks load-bearing (§4).
     changed, source_changed, within_tolerance = [], [], []
     for sku in old_by_sku.keys() & new_by_sku.keys():
         before, after = old_by_sku[sku], new_by_sku[sku]
@@ -174,11 +147,10 @@ def diff_products(old: List[dict], new: List[dict],
             continue
 
         # A row whose price_source differs between runs is not comparable on
-        # price: here that means one run had its structured price confirmed
-        # against a rendered tile ("jsonld+dom") while the other did not
-        # ("jsonld"), or fell back to reading the DOM alone ("dom"). The
+        # price: here that means one row came from a grid tile ("listing")
+        # and the other from an app page ("detail" / "detail+jsonld"). The
         # figures should agree, and when they do not, the difference is in
-        # how OUR two snapshots rendered, not in what the shop charges.
+        # which payload OUR two snapshots read, not in what the store charges.
         # Reporting it as a price change would be a false alarm about the
         # site. Non-price fields still compare fine.
         sources = (before.get("price_source"), after.get("price_source"))
@@ -287,9 +259,8 @@ def _check_comparable(args) -> bool:
             # This tool's whole premise is one row per `sku`, diffed on
             # price. A mode that produces many rows per sku would give a diff
             # whose every line is an artefact of two rows sharing an id, so
-            # it is refused outright rather than answered. Both of this
-            # repo's current modes qualify; the check is here so that adding
-            # one that does not is caught rather than discovered.
+            # it is refused outright rather than answered. `--mode reviews`
+            # is such a mode here (many reviews share one package id).
             problems.append(
                 f"{label} ({path}) is a {mode!r} run, which is not one row "
                 f"per sku. This tool diffs one row per sku on price, so there "
@@ -305,22 +276,12 @@ def _check_comparable(args) -> bool:
             f"detail row carry different fields, so `added`/`removed` would "
             f"describe the mode change rather than the catalogue.")
 
-    # A CURRENCY MISMATCH, which on this site should be impossible — and is
-    # checked anyway.
-    #
-    # The sibling repos guard cross-storefront diffs with `source`: eleven
-    # country hostnames, so a run of one against another is refused on the
-    # hostname alone. Google Play is ONE marketplace with ONE currency —
-    # `?lang=` changes the chrome and nothing else, and the payload states no
-    # currency at all while the page's structured data says JPY on both
-    # routes, measured 2026-09-21 — so `source` is "play.google.com" on both
-    # sides and there is no storefront split for it to catch.
-    #
-    # This check is therefore expected never to fire, and it is kept for one
-    # reason: if it EVER does, it means either the site has grown a second
-    # currency or something in this repo is inventing them, and both of those
-    # make every row's price incomparable. A guard that costs nothing and
-    # fails loudly beats discovering it from a diff.
+    # A CURRENCY MISMATCH. Google Play prices per market: the README's
+    # table shows one app quoted in USD, EUR, JPY, INR and BRL from one
+    # address, with only `gl` changed. `source` is "play.google.com" on every
+    # run, so it cannot tell two markets apart; the currency can. Two runs in
+    # different currencies are almost certainly runs of different `--gl`
+    # markets, and their prices (and ratings) are not comparable.
     currencies = {}
     for label, path in (("--old", args.old), ("--new", args.new)):
         try:
@@ -338,12 +299,10 @@ def _check_comparable(args) -> bool:
     if len(set(currencies.values())) > 1:
         problems.append(
             f"the two runs quote different currencies ({currencies}). "
-            f"Google Play prices everything in JPY for every visitor — "
-            f"measured on both routes and under both `?lang=` values — so "
-            f"this should be impossible: either the site has grown a second "
-            f"currency or one of these runs invented one, and either way "
-            f"every row's price is incomparable. `source` cannot catch it: "
-            f"it is 'play.google.com' on both sides.")
+            f"Google Play prices per market, so these are most likely runs "
+            f"of different --gl values, and their prices and ratings are not "
+            f"comparable. Diff two runs of the same --gl. `source` cannot "
+            f"catch it: it is 'play.google.com' on both sides.")
 
     if not problems:
         return True
@@ -373,13 +332,10 @@ def parse_args():
                    help="Treat a price move smaller than PCT%% as an exchange-"
                         "rate tick rather than a price change: reported "
                         "separately and ignored by --fail-on-change. Default "
-                        "0, which is what a Google Play run wants for two "
-                        "reasons: the site quotes JPY to every visitor so "
-                        "there is no conversion drift to absorb, and the yen "
-                        "has no subunit, so every price is a whole number and "
-                        "there is no rounding tick either. The flag is "
-                        "inherited from this scraper family; set it non-zero "
-                        "only with a reason you can state.")
+                        "0. The flag is inherited from this scraper family "
+                        "and no exchange-rate drift has been measured on "
+                        "Google Play; set it non-zero only with a reason you "
+                        "can state.")
     p.add_argument("--fail-on-change", action="store_true",
                    help="Exit 1 if anything was added, removed or changed — "
                         "for a cron job that should only notify on a real diff.")

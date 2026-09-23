@@ -12,51 +12,31 @@ body:
 
         A few things answer most reports faster than we can:
 
-        - **Everything exit 3?** Check the CLIENT before you check the
-          address. The listing routes on this site need no proxy and no key
-          — measured 2026-09-21, one datacentre IP was served 45 products a
-          page by plain curl AND by headless Chromium, and refused with a
-          43-byte deny only when a curl handshake claimed a Chrome
-          User-Agent. So look for a user agent or fingerprint that disagrees
-          with the TLS handshake under it. See
-          [TROUBLESHOOTING.md](../blob/main/TROUBLESHOOTING.md).
-        - **Exit 3 only after page 1?** That is the shape a fingerprint
-          problem takes here: nav 1 served, navs 2 onward denied. Test any UA
-          or `--fingerprint` change over two pages.
-        - **HTTP 503 and アクセスが集中しております?** That is Rakuten's own
-          rate-limit page, not a block. Raise `--delay` or lower
-          `--concurrency`.
-        - **`price` null on some rows?** Worth this issue: `price` was
-          populated on 405 of 405 measured rows. Say which URL and attach the
-          `--dump-html` output.
-        - **`original_price` or `discount_pct` null?** Expected on the
-          listing route — the payload publishes no was-price at all. Use
-          `--mode product`, which reads Rakuten's verified reference price.
-        - **`in_stock` True on every row?** Expected: the search excludes
-          sold-out products rather than marking them.
-        - **`rating` and `review_count` empty on some rows?** Expected:
-          nobody has reviewed that product. Rakuten writes that as
-          `{score: 0, numReviews: 0}` and both columns are nulled together.
-        - **`currency` null on later pages?** The site states the currency in
-          a JSON-LD block it publishes on page 1 only, and the run carries it
-          forward. A null means that block moved — worth this issue.
-        - **Zero rows?** You may be on a route that has none: the mall front
-          page carries campaign rails and no grid; a merchant storefront
-          (`www.rakuten.co.jp/{shop}/`) carries an EMPTY payload; and
-          `ranking.rakuten.co.jp` is a different application this repo does
-          not read. Those are exit 4 and correct answers.
-        - **A page collected twice?** Worth this issue. Rakuten re-serves
-          page 1 under HTTP 200 past the end of a listing, and the run is
-          supposed to detect that from the offset the server states.
-        - **The run stopped short of the catalogue?** That is the site's own
-          cap, and it is severe here: Rakuten serves at most 6,750 results
-          per query (150 pages of 45) however many it matched. One measured
-          query reported 3,053,682 matches against that same 6,750. The run
-          reports both numbers in its sidecar. Narrow the query with the
-          site's own filters — genre, price band, shop, tag — and run each
-          slice.
-        - **Wrong language?** The language is a path segment (`/ar/`), not
-          something the exit IP decides. Prices are AED for every visitor.
+        - **Everything exit 3?** Measured 2026-09-22, every route this repo
+          reads answered a plain HTTP client in full from a datacentre
+          address, with no key and no proxy. So check the boring causes
+          first: a wrong `--gl` for the market you meant, and your own
+          request rate. See the README's "Do you need any of the paid
+          products?".
+        - **Exit 4 for one app?** A package id that does not exist gets a
+          clean HTTP 404 from Play, which this scraper reports as
+          `not_found` — an answer, not a refusal. Check the id before you
+          check your proxy.
+        - **A different rating from the one you see?** Play computes a
+          rating per COUNTRY. Every row carries `gl` and `hl`; compare rows
+          of the same market.
+        - **`installs_exact` null on every listing row?** Expected: no
+          listing tile carries it (0 of 330 measured). Use `--mode app`.
+        - **`genre_id` null on every listing row?** Expected: a tile
+          publishes the genre only as display text. The key arrives on
+          `--mode app`.
+        - **`--pages` above 1 on `--mode search` gave one page?** Expected:
+          Play answers a query once, and the run warns about it.
+        - **A page collected twice, or `position` values that are not
+          1..N?** Worth this issue.
+        - **Google's name in the `brand` column?** Worth this issue: `brand`
+          is the developer, and the seller of record (in the EU "Google
+          Commerce Ltd") must not reach it.
 
   - type: dropdown
     id: engine
@@ -104,8 +84,7 @@ body:
       render: shell
       placeholder: |
         python3 playwright_scraper.py \
-          --url "https://search.rakuten.co.jp/search/mall/-/100356/" \
-          --pages 3 --out coffee
+          --mode listing --category GAME --pages 3 --out games
     validations:
       required: true
 
@@ -125,7 +104,7 @@ body:
     attributes:
       label: What you expected instead
       placeholder: >-
-        96 products, as the README says a category page yields.
+        64 apps, as the README says the GAME category page yields.
     validations:
       required: true
 
