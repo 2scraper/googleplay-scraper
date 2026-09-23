@@ -38,6 +38,11 @@ discovered from a bill or a diff.
   A `!fixtures_generated.json` exception for a file this repo does not have
   was removed, and the Dockerfile example no longer writes `/out/coffee`.
 
+- `SECURITY.md` said this project has no releases or version tags; it has
+  both. "Supported versions" now names the latest release and `main`.
+- `captcha_solver.py`'s docstring pointed at a "No DataDome solver" section
+  that does not exist in this repo (it came with the copied core). Removed.
+
 ## [0.1.0] — 2026-09-22
 
 First release. Five modes, four back ends, and one row schema shared with the
