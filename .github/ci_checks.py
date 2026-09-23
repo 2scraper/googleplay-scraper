@@ -62,12 +62,11 @@ CREDENTIALLED_URL = re.compile(r"(?:ws|wss|https?)://[^\s\"'/]+:[^\s\"'/]+@")
 CREDENTIAL_ALLOWED = (
     # documentation placeholders
     "USER:PASS", "user:pass", "ACCOUNT:PASSWORD", "LOGIN:PASSWORD",
-    # This repo's April 2026 prototype README documented a proxy URL as
-    # `http://username:password@…`. That commit is in the history and cannot
-    # be removed from it, so --history-check would fail forever on a literal
-    # placeholder — which would teach everyone to ignore the one check that
-    # exists to be read exactly once, before publishing. Allowed by NAME, so
-    # a real login still fails.
+    # Inherited from a sibling repo whose April 2026 prototype README
+    # documented a proxy URL as `http://username:password@…`, a commit that
+    # cannot be removed from that repo's history. Here the literal appears
+    # only in documentation (a docstring and this comment). Allowed by NAME,
+    # so a real login still fails.
     "username:password",
     "{login}", "{user}", "password}@", "***", "u:p@h",
     "login:password@host:port",     # the shape a refusal message prints
@@ -82,18 +81,13 @@ HEX32 = re.compile(r"\b[0-9a-f]{32}\b")
 
 # EMPTY, DELIBERATELY, and the reason is worth more than the tuple.
 #
-# Google Play publishes a 32-hex identifier of its own — the cross-merchant
-# catalogue id in `productUrl`
-# (`product.play.google.com/product/-/55b617dc…/`) — so this repo had the same
-# choice a sibling faced: subtract that shape from the scan, or keep the scan
-# strict and take the id out of the fixtures.
-#
-# It keeps the scan strict. Nothing in this schema reads `productUrl`, so
-# `make_fixtures.py` replaces the id with a placeholder and there is no
-# 32-hex string left in the working tree at all. That is the stronger
-# arrangement: an allowlist forgiving 32-hex inside a play.google.com URL is a
-# hole a real key could later hide in, and the only thing it buys is keeping
-# a field nobody uses.
+# A sibling repo (rakuten-scraper) publishes a 32-hex identifier of its own
+# and faced a choice: subtract that shape from the scan, or keep the scan
+# strict and take the id out of the fixtures. It kept the scan strict,
+# because an allowlist forgiving 32-hex inside a site URL is a hole a real
+# key could later hide in. None of the identifiers this repo reads (package
+# ids, developer ids, review ids) is a bare 32-hex string, so there is
+# nothing to subtract here either.
 #
 # So a bare 32-hex string ANYWHERE in this repository fails, with no
 # exceptions to reason about. If a future capture needs one, add it here with
@@ -107,10 +101,10 @@ def _without_site_ids(line):
     Two passes, and the second is what makes this precise rather than broad.
     The first removes the identifier in the CONTEXTS the site publishes it
     in. The second removes those exact VALUES anywhere else on the same line
-    — because a row that has already shown a hex as the ad's public id in its
-    URL is not also carrying it as a separate secret, and in CSV that is
-    exactly what happens: the URL column and the `listing_uuid` column hold
-    the same string, one of them with no surrounding context at all.
+    — because a row that has already shown a hex as a public id in its URL
+    is not also carrying it as a separate secret, and in a sibling repo's CSV
+    that is exactly what happened: its URL column and an id column held the
+    same string, one of them with no surrounding context at all.
 
     Anything left is a 32-hex the line never justified, and it still fails.
     """
@@ -128,38 +122,15 @@ def _without_site_ids(line):
 HEX32_ALLOWED = ("sha", "hash", "nonce", "example", "md5", "digest",
                  "checksum")
 
-# Files the BARE-HEX rule is not applied to, and the reason it is not.
-#
-# These are verbatim site markup and verbatim run output. This site emits
-# 32-hex identifiers in at least five public contexts — the tail of an ad
-# URL, the `uuid` field, a photo filename, the `location_list.uuids` array,
-# and its own front-end keys — so a bare-hex rule over them produces
-# hundreds of findings that are all correct data. A check that cries wolf 221
-# times is a check somebody switches off, and then it protects nothing.
-#
-# What covers them instead is STRONGER, not weaker, because it looks for the
-# shape of a secret rather than the shape of a hex string:
-#
-#   * every rule below still applies here — a credentialled URL and a
-#     key-shaped field both fail in these files;
-#   * `make_fixtures.py` refuses to write a fixture whose scrub left an
-#     agent's name, a per-seller UUID or a key-shaped value in it;
-#   * `smoke_test.py` re-scans the whole committed fixture corpus for JWTs,
-#     access tokens, API keys, Sentry DSNs, session ids, emails and proxy
-#     credentials, and FAILS if the corpus it scanned was empty.
-# EMPTY, and that is the stricter arrangement rather than an omission.
+# Files the BARE-HEX rule is not applied to. EMPTY, and that is the
+# stricter arrangement rather than an omission.
 #
 # A sibling repo exempts its generated data files from the bare-hex rule,
-# because its site publishes a 32-hex identifier in five contexts and a rule
-# that fires 221 times on correct data is a rule somebody switches off. This
-# repo does not need the exemption: `make_fixtures.py` replaces Google Play's own
-# 32-hex catalogue id with a placeholder, so there is no 32-hex string in the
-# fixtures or the sample output at all, and the bare-hex rule therefore
-# covers them like every other tracked file.
-#
-# Keeping this empty means the files most likely to acquire a pasted
-# credential — the big generated ones nobody reads line by line — are the
-# ones the strictest rule applies to.
+# because its site publishes a 32-hex identifier in several contexts and a
+# rule that fires hundreds of times on correct data is a rule somebody
+# switches off. This repo does not need the exemption, so the files most
+# likely to acquire a pasted credential — the big generated ones nobody
+# reads line by line — are the ones the strictest rule applies to.
 GENERATED_DATA_FILES = ()
 
 # A secret sitting in a field named like one. This is what the bare-hex rule
@@ -167,16 +138,16 @@ GENERATED_DATA_FILES = ()
 # including the generated ones.
 #
 # `\\?"` on every quote, and that is not defensive punctuation — it closes a
-# hole this check had. `fixtures_generated.json` stores each fixture's markup
+# hole this check had. A sibling's `fixtures_generated.json` stores each fixture's markup
 # as a JSON STRING, so every quote inside it is escaped: the file contains
 # `\"apiKey\": \"…\"`, not `"apiKey": "…"`. The pattern with bare quotes
-# therefore matched ZERO times in the largest file in the repository — the
-# one holding 427 KB of captured page payload, which is precisely where a
-# front-end key would arrive.
+# therefore matched ZERO times in the largest fixture file of the sibling
+# repo where this was found (rakuten-scraper) — 427 KB of captured page
+# payload, which is precisely where a front-end key would arrive.
 #
-# Verified by planting a real-shaped key in a fixture: before the fix the
-# scan reported "nothing credential-shaped" and passed; after it, the scan
-# names the file and the line. And note what would NOT have saved it: this
+# Verified there by planting a real-shaped key in a fixture: before the fix
+# the scan reported "nothing credential-shaped" and passed; after it, the
+# scan names the file and the line. Note what would NOT have saved it: that
 # site's front-end keys are 32-char ALPHANUMERIC rather than hex, so the
 # bare-hex rule does not see them either.
 #
@@ -200,9 +171,8 @@ KEY_SHAPED_FIELD = re.compile(
 HISTORY_DECIDED = {
     # EMPTY, and it should stay that way. This repository was created clean:
     # every blob that has ever existed in it was written by the work that
-    # built it, the fixtures were scrubbed by `make_fixtures.py` before their
-    # first commit, and the raw captures live OUTSIDE the repo in
-    # `../captures/rakuten/` on purpose.
+    # built it. The captures in `captures/` are committed on purpose, trimmed
+    # and scrubbed first (see captures/README.md and scrub_fixtures.py).
     #
     # An entry here is a claim that a human read the blob and decided it is
     # not a leak. Anything not listed still fails.
@@ -217,15 +187,12 @@ CAPTURES_IN_HISTORY_DECIDED = {
     # Empty, and checked rather than assumed: the history scan was run over
     # every blob before this repo was made public.
     #
-    # Worth knowing what a capture of THIS site would carry if one were ever
-    # committed, so the decision can be made quickly: an item page holds two
-    # 32-char front-end API keys (`apiConfig.ncp.apiKey`,
-    # `apiConfig.shipping.apiKey`) and its reviewers' display names and
-    # review text; a listing page holds a per-impression session id on each
-    # sponsored slot. All of it is Google Play's own rather than ours — no
-    # 2Captcha key, no proxy credential, no cookie — and the reviewer's name
-    # and words are still a person's, which is why `make_fixtures.py`
-    # replaces them before anything is embedded.
+    # Worth knowing what a capture of THIS site carries, so a decision can
+    # be made quickly: a review payload publishes a reviewer's display name,
+    # avatar and a stable profile id beside their words (captures/README.md).
+    # All of it is Google Play's own rather than ours — no 2Captcha key, no
+    # proxy credential, no cookie — and it is still a person's, which is why
+    # `scrub_fixtures.py` replaces it before anything is committed.
 }
 
 # Suffixes the HISTORY scan walks. It reads blobs out of git, where a
@@ -237,10 +204,9 @@ SCANNED_SUFFIXES = (".py", ".md", ".txt", ".yml", ".yaml", ".example")
 #
 # A suffix allowlist is a scanner that cannot see the thing most likely to
 # leak. `--dump-html live_results` writes `live_results.page1` — no suffix
-# the list knew — and a merge committed two of them, 1.5 MB each, carrying 26
-# per-seller UUIDs, 12 copies of the site's Algolia key and its Sentry keys.
-# The check that exists to stop exactly that ran, passed, and never opened
-# them.
+# the list knew — and in a sibling repo a merge committed two of them, 1.5 MB
+# each, carrying that site's own keys. The check that exists to stop exactly
+# that ran, passed, and never opened them.
 #
 # So the rule inverted: scan every tracked file, skip only what cannot be
 # grepped.
@@ -265,15 +231,15 @@ CAPTURE_SHAPES = (
     # called. The four rules above all key on a NAME someone chose — a
     # `--dump-html` default, a debug suffix, one particular directory — and
     # that is exactly how a 1.5 MB page dump nearly reached the first commit
-    # of this repository: it sat in `live/`, which no pattern here listed and
-    # `.gitignore` did not cover either, and `git add -A` staged it while
-    # this check reported nothing.
+    # of a sibling repo (rakuten-scraper): it sat in `live/`, which no
+    # pattern listed and `.gitignore` did not cover either, and `git add -A`
+    # staged it while this check reported nothing.
     #
     # A repo's own source has no business keeping rendered HTML or a
     # screenshot in a run directory, so the shape is the directory kind
     # rather than the filename. `.github/` and `tests/` are not run
     # directories and are unaffected; a fixture belongs in
-    # fixtures_generated.json, which make_fixtures.py scrubs and verifies.
+    # captures/, which make_fixtures.py re-takes and scrub_fixtures.py scrubs.
     re.compile(r"^(?:live|out|output|runs?|results?|tmp|scratch|dumps?)/"
                r".*\.(?:html|htm|png|jpe?g|mhtml)$"),
     # And a bare .html anywhere at the repo ROOT, which is where a
