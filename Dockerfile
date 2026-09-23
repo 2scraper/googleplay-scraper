@@ -5,7 +5,7 @@
 #   docker build -t googleplay-scraper .
 #   docker run --rm -v "$PWD/out:/out" googleplay-scraper \
 #     --url "https://play.google.com/store/apps/category/TOOLS" \
-#     --pages 3 --out /out/coffee
+#     --pages 3 --out /out/tools
 #
 # Pass --proxy/--twocaptcha-key the same way as running locally, or mount a
 # .env at /app/.env — nothing here bakes in a credential.

@@ -299,11 +299,10 @@ def dedupe_by_key(rows: Sequence[Any], seen: Set[str], key: str = "sku") -> List
 
     `seen` is mutated in place, so callers thread the same set across pages —
     a stale or repeating next-page link then re-parses a page without
-    duplicating its rows into the final output. On this site this DOES fire
-    on healthy runs: page 1 and page 2 of one category listing shared
-    exactly 3 products, all three from the "cheaper products" carousel that
-    appears on every page of a listing. So a small non-zero drop count here
-    is expected and a large one is not.
+    duplicating its rows into the final output. On this site it is expected
+    to fire on healthy runs of `--mode listing`: page 1 and the shelves it
+    links to are overlapping views of one catalogue, so an app can appear on
+    more than one of them.
 
     A row with no key is always kept: there is nothing to check a duplicate
     against, and dropping it would be a silent data loss rather than a
@@ -379,19 +378,11 @@ EXIT_NO_PRODUCTS = 4
 # search genuinely matched nothing" from "something stood between us and the
 # content". See product_parser.detect_bot_challenge.
 #
-# On this site this code specifically does NOT cover the three ways to get a
-# real page with no products on it: a `/p/<slug>` discovery hub, which
-# answers 200 with banners and carousels and no grid; a search whose query
-# matches nothing ("Oops, produk nggak ditemukan"); and one page past the
-# end of a category listing. All three are EXIT_NO_PRODUCTS — the request
-# was served exactly as asked and simply has no products on it. Reporting
-# any of them as blocked would send a user hunting for a proxy problem that
-# does not exist.
-#
-# What EXIT_BLOCKED means here is unusually literal: this site refuses a
-# address it has scored NOTHING at all. No status code, no interstitial, no
-# vendor marker — the HTTP/2 stream is reset and the run sees a connection
-# error rather than a page.
+# On this site this code specifically does NOT cover a package id that does
+# not exist: Play answers it with a clean HTTP 404, which the parser calls
+# `not_found` and the run reports as EXIT_NO_PRODUCTS — an answer, not a
+# refusal. Reporting it as blocked would send a user hunting for a proxy
+# problem that does not exist.
 # Bad usage — a flag combination or a missing argument the run cannot
 # proceed on. argparse already exits 2 for a malformed command line; this
 # names the same number so a hand-written usage error agrees with it instead
@@ -480,20 +471,16 @@ def run_meta(status: str, stop_reason: str, pages_requested: int,
 
     `mode` and `source` are recorded because `mode` is not implied by the
     repo: the same output prefix can hold a listing run or a product run,
-    and those populate different columns — `sold` is a FLOOR on a listing
-    row and exact on a product row, so diffing one against the other would
+    and those populate different columns — `installs_exact` is null on a
+    listing row and set on an app row, so diffing one against the other would
     report every row as changed. diff_runs.py refuses a pair whose modes or
     sources differ. `source` is `play.google.com` on every row of every run
     here, since the site has one storefront and one currency; it is kept
     because consumers read these columns by name across the family.
 
-    `extra` carries facts about the run that are not about any single row.
-    `--mode shop` uses it for the SELLER's own name, location, rating and
-    review count: a run covers exactly one shop, so those belong to the run
-    rather than repeated down a column, and the shop's review count (16679
-    on the captured seller) is a different number from its listings' own
-    (827 on one of them) — putting them in one column would make the schema
-    lie.
+    `extra` carries facts about the run that are not about any single row:
+    here the run's `gl` and `hl`, how many shelves a grid run visited, and on
+    `--mode reviews` the per-call count and whether authors were included.
 
     `pages_failed` lists the pages that did not yield data, by number.
     `pages_completed` alone was enough only while pages were fetched strictly
@@ -564,22 +551,17 @@ def save(rows: Sequence[Any], out_prefix: str, fmt: str,
 # the DATA (a page contributed nothing not already seen, so the listing is
 # over), while the second is a property of a CSS SELECTOR and is therefore
 # the weaker signal — a renamed attribute looks identical to a short
-# catalogue. On this site that ordering is not a preference, it is the only
-# thing that works: the site publishes NO `link[rel=next]` and no numbered
-# anchors anywhere, a CATEGORY listing is addressable by `?page=N`, and a
-# SEARCH is not addressable at all — `?page=2` there returns an empty result
-# set rather than page 2. So "no new products" is the one termination
-# condition available on a search. See page_flow.pagination_is_addressable.
+# catalogue. On this site there is no `?page=N` on any route: a grid run
+# follows the shelves page 1 links to and stops on data, which is what
+# "no_new_products" records.
 #
-# "single_page_mode" is complete by construction: --mode product reads one
+# "single_page_mode" is complete by construction: a mode that reads one
 # page because one page is all there is.
 # `end_of_listing` is a COMPLETE result and leaving it out of this tuple is a
-# bug worth naming, because it produced exit 6 for a correct run. On this
-# site a listing does not end with an error or an empty page: Google Play answers
-# a request past the last page by serving page 1 again under HTTP 200, and
-# the engine detects that from the offset the server states rather than from
-# its own request. Having found the real end of the results, the run has
-# everything the site will give it.
+# bug worth naming, because it produced exit 6 for a correct run in a sibling
+# repo. Here it means the run ran out of shelves to follow, or a reviews run
+# was handed no further continuation token: the run has everything the site
+# will give it.
 COMPLETE_STOP_REASONS = ("completed", "pagination_exhausted", "no_new_products",
                          "single_page_mode", "end_of_listing")
 
