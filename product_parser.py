@@ -149,7 +149,8 @@ _DEV_NUMERIC_RE = re.compile(r"^\d+$")
 
 # Google's refusal vocabulary. Every one of these scored ZERO on all eleven
 # captures taken 2026-09-22, served pages and the store's own 404 alike —
-# which is the requirement (§ "count it on a page you know is good"), and is
+# which is the requirement (a marker must be counted on a page known to be
+# good before it is trusted), and is
 # also all that can honestly be said about them: no refusal has been observed
 # from this address, so these are candidates rather than confirmed markers.
 #
@@ -177,6 +178,11 @@ ASSET_HOST = "play-lh.googleusercontent.com"
 # Two is the floor rather than one so a single incidental reference cannot
 # pass. The lowest count on a real served page measured here is 252.
 MIN_ASSET_REFERENCES = 2
+
+# The sentence Play's own 404 template carries (captures/notfound.html). Only
+# the US English capture exists, so this is read together with "no store
+# images at all" and only where no HTTP status is available.
+NOT_FOUND_MARKER = "the requested URL was not found on this server"
 
 
 def asset_reference_count(markup: str) -> int:
@@ -1385,6 +1391,15 @@ def detect_page_state(markup: str, status: Optional[int] = None,
     if status == 404:
         return "not_found", "http_404"
 
+    # The same 404 with no status to read — Selenium exposes none. Play's own
+    # 404 template states it in its body and is built out of NONE of the
+    # store's images, so the two together are the page's own words rather
+    # than a guess. Without this the Selenium engine read a typo'd package id
+    # as blocked (exit 3) while its twins read it as not found.
+    if (status is None and NOT_FOUND_MARKER in markup
+            and asset_reference_count(markup) == 0):
+        return "not_found", "not_found_template"
+
     marker = challenge_marker(markup)
     if marker:
         return "blocked", f"challenge_marker:{marker}"
@@ -1394,6 +1409,12 @@ def detect_page_state(markup: str, status: Optional[int] = None,
     if status == 503:
         return "unknown", "http_503"
 
+    # An empty document is a navigation that did not complete (about:blank,
+    # a failed load), not a refusal. Checked BEFORE the asset count, which
+    # would otherwise call it blocked and send the reader after a proxy.
+    if not markup.strip():
+        return "unknown", "empty_response"
+
     assets = asset_reference_count(markup)
     if assets < MIN_ASSET_REFERENCES:
         # Covers the cases no marker list can: a proxy error page, Chromium's
@@ -1401,9 +1422,6 @@ def detect_page_state(markup: str, status: Optional[int] = None,
         # title and would pass any title check), and an interstitial nobody
         # has seen yet.
         return "blocked", f"asset_references={assets}"
-
-    if not markup.strip():
-        return "unknown", "empty_response"
 
     return "empty", f"served_no_records assets={assets}"
 

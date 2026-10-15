@@ -15,8 +15,8 @@ rather than left to be discovered:
     `connect_over_cdp` and Puppeteer's `browserWSEndpoint` take a full
     `ws://user:pass@host:port` and authenticate on the WebSocket upgrade;
     chromedriver's `debuggerAddress` takes a bare `host:port` with nowhere to
-    put a password. So `--cdp-endpoint` is refused here with that reason,
-    rather than half-working.
+    put a password. So `--cdp-endpoint` is refused here with that reason
+    (exit 2, a usage error), rather than half-working.
   * **`--proxy-server` cannot authenticate at all.** Credentials are stripped
     and a warning is printed; a user must not be left believing a
     `user:pass@` URL is doing something.
@@ -28,7 +28,7 @@ those exist.
 
 import sys
 import urllib.parse
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 # Module level on purpose — see the note in playwright_scraper.py.
 from selenium import webdriver
@@ -57,9 +57,10 @@ fetch(url, {
   headers: {'content-type': 'application/x-www-form-urlencoded;charset=UTF-8'},
   body: body,
   credentials: 'include'
-}).then(function (r) { return r.text(); })
-  .then(function (t) { done(t); })
-  .catch(function (e) { done('ERROR:' + e); });
+}).then(function (r) {
+    return r.text().then(function (t) { done({status: r.status, text: t}); });
+  })
+  .catch(function (e) { done({error: String(e)}); });
 """
 
 
@@ -71,15 +72,30 @@ class SeleniumDriver:
 
     def fetch(self, url: str, mode: str) -> Tuple[str, Optional[int]]:
         self._driver.get(url)
+        # No status: see the module docstring.
+        return self.read(mode), None
+
+    def read(self, mode: str) -> str:
+        """Wait for the page as it is now to paint, then return its markup."""
         page_flow.wait_for_count(
             lambda sel: len(self._driver.find_elements(By.CSS_SELECTOR, sel)),
             lambda ms: self._sleep(ms),
             page_flow.ready_selector(mode), page_flow.min_matches(mode),
             page_flow.content_timeout_ms(mode))
-        # No status: see the module docstring.
-        return self._driver.page_source, None
+        return self._driver.page_source
 
-    def post_form(self, url: str, form: Dict[str, str]) -> str:
+    def evaluate(self, js: str, arg: Any = None) -> Any:
+        """Run an `() => expr` or `(arg) => expr` function in the page.
+
+        Selenium's dialect takes a function BODY, so the expression is
+        wrapped and called with Selenium's own `arguments`.
+        """
+        script = "return (" + js + ").apply(null, arguments);"
+        if arg is None:
+            return self._driver.execute_script(script)
+        return self._driver.execute_script(script, arg)
+
+    def post_form(self, url: str, form: Dict[str, str]) -> Tuple[str, Optional[int]]:
         body = urllib.parse.urlencode(form)
         # The POST must come from Play's own origin, and after a `fetch()` the
         # driver is already there — but a reviews run that was handed a bare
@@ -87,10 +103,10 @@ class SeleniumDriver:
         if "play.google.com" not in (self._driver.current_url or ""):
             self._driver.get("https://play.google.com/store/apps")
         self._driver.set_script_timeout(engine_core.DEFAULT_TIMEOUT_MS / 1000)
-        result = self._driver.execute_async_script(_POST_FORM_JS, url, body)
-        if isinstance(result, str) and result.startswith("ERROR:"):
-            raise WebDriverException(result)
-        return result or ""
+        result = self._driver.execute_async_script(_POST_FORM_JS, url, body) or {}
+        if result.get("error"):
+            raise WebDriverException(result["error"])
+        return result.get("text") or "", result.get("status")
 
     def current_url(self) -> str:
         return self._driver.current_url or ""
@@ -105,8 +121,8 @@ class SeleniumDriver:
 
 def launch(args, proxy_url: Optional[str]) -> SeleniumDriver:
     if args.cdp_endpoint:
-        raise SystemExit(
-            "[error] --cdp-endpoint is not available on the Selenium engine: "
+        raise engine_core.UsageError(
+            "--cdp-endpoint is not available on the Selenium engine: "
             "chromedriver's debuggerAddress takes a bare host:port and has "
             "nowhere to put the endpoint's credentials. Use the Playwright or "
             "pyppeteer engine for a managed browser.")
@@ -128,10 +144,11 @@ def launch(args, proxy_url: Optional[str]) -> SeleniumDriver:
         options.add_argument(f"--proxy-server={stripped}")
 
     if args.fingerprint:
-        print("[warn] --fingerprint is not applied on the Selenium engine: a "
-              "bare user-agent override without the matching client hints is "
-              "a self-contradicting identity, which is worse than none",
-              file=sys.stderr)
+        raise engine_core.UsageError(
+            "--fingerprint is not available on the Selenium engine: a bare "
+            "user-agent override without the matching client hints is a "
+            "self-contradicting identity, which is worse than none. Use the "
+            "Playwright engine.")
 
     driver = webdriver.Chrome(options=options)
     driver.set_page_load_timeout(engine_core.DEFAULT_TIMEOUT_MS / 1000)

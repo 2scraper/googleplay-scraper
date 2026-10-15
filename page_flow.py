@@ -158,20 +158,6 @@ def counts_as_blocked(state: str) -> bool:
     return STATE_POLICY.get(state, STATE_POLICY["unknown"])["blocked"]
 
 
-def is_unpainted(state: str, html: Optional[str]) -> bool:
-    """Served, but the grid has not arrived yet — wait, do not retry.
-
-    A page Play plainly served, with its own images all over it and no app
-    records in it, is either genuinely empty or not painted. Distinguishing
-    them is what stops a run refetching a page that was seconds from being
-    ready, and it costs one substring: the store's own shell is there, so it
-    was served.
-    """
-    if state != "empty" or not html:
-        return False
-    return parser.asset_reference_count(html) >= parser.MIN_ASSET_REFERENCES
-
-
 # --------------------------------------------------------------------------
 # Budgets
 # --------------------------------------------------------------------------
@@ -205,15 +191,38 @@ def throttle_delay_ms(attempt: int) -> int:
     return THROTTLE_BACKOFF_MS[idx]
 
 
-# One paid solve per page. Enforced through `solve_budget()`, which every
-# call site goes through: a sibling repo in this family had this exact
-# constant, two call sites per attempt and a counter on only one of them, and
-# one page bought three solves.
+# One paid solve per page. Enforced through `SolveBudget`, which the one
+# solve call site in `engine_core` goes through BEFORE any purchase: a sibling
+# repo in this family had this exact constant, two call sites per attempt and
+# a counter on only one of them, and one page bought three solves.
 SOLVES_PER_PAGE = 1
 
 
 def solve_budget(spent: int) -> bool:
     return spent < SOLVES_PER_PAGE
+
+
+class SolveBudget:
+    """The paid-solve allowance for a whole run, counted per page number.
+
+    One object per run, held outside the browser session, so neither a retry
+    nor a fresh browser on a new exit resets it: a different address is a
+    reason to fetch the page again, not a fresh allowance to pay for it.
+    """
+
+    def __init__(self) -> None:
+        self._spent: Dict[int, int] = {}
+
+    def spend(self, page: int) -> bool:
+        """True, and the allowance is used, if page `page` may buy a solve."""
+        spent = self._spent.get(page, 0)
+        if not solve_budget(spent):
+            return False
+        self._spent[page] = spent + 1
+        return True
+
+    def spent(self, page: int) -> int:
+        return self._spent.get(page, 0)
 
 
 # --------------------------------------------------------------------------
@@ -265,15 +274,6 @@ def warn_unpaginated(mode: str, pages: int) -> Optional[str]:
                 "apps across the queries measured), and publishes no further "
                 "pages and no shelves to follow" % pages)
     return None
-
-
-def pagination_is_addressable(mode: str) -> bool:
-    """Can pages 2..N be planned up front, or must they be chained?
-
-    Grid modes: yes, once page 1 is in hand. Reviews: no — page 2's address
-    is a token inside page 1's response.
-    """
-    return mode in parser.GRID_MODES
 
 
 def concurrency_limit(mode: str, url: str = "") -> Optional[int]:
@@ -335,12 +335,11 @@ def block_advice(html: Optional[str], headless: bool,
     if not has_pool:
         tips.append(
             "if it really is the address, --proxy-file with residential "
-            "exits is the lever; --concurrency above 1 from a single address "
-            "is the fastest way to be scored rather than served")
+            "exits is the lever")
     if not has_key:
         tips.append(
             "no 2Captcha key is set. No challenge has been observed on this "
             "site from this address, so a key is not the first thing to buy "
-            "here — but the solver path is wired and will use one if a "
-            "challenge does appear")
+            "here — but if a reCAPTCHA does appear on a refused page, the "
+            "run will solve it with a key (at most one paid solve per page)")
     return tips

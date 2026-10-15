@@ -74,10 +74,14 @@ So the honest positioning is: **the paid products buy volume and geography
 here, not access.** Many addresses if you are reading the store at scale, a
 specific country if you want a market whose language you cannot get from
 `gl` alone, and no browser infrastructure of your own if you use the
-Scraping Browser API. The captcha solver is wired and has never been needed
-from this address — if Google does challenge you, it will be reCAPTCHA, and
-`captcha_solver.py` builds `RecaptchaV2TaskProxyless` /
-`RecaptchaV3TaskProxyless` for it.
+Scraping Browser API. No captcha has been needed from this address. If
+Google does put a reCAPTCHA on a refused page, a run with a 2Captcha key
+detects it, solves it (`RecaptchaV2TaskProxyless` /
+`RecaptchaV3TaskProxyless`), injects the token and judges the page that
+follows — at most **one paid solve per page**, however many retries or fresh
+exits that page takes. `--solve-captcha never` turns it off. This path has
+been exercised offline against a stubbed solver only; no live solve has been
+run on this site.
 
 The canary is the standing test of that claim: it runs a real three-page
 scrape **daily from a bare GitHub runner with no secrets** and is expected to
@@ -143,8 +147,9 @@ scraper either.
 * **Grids** publish their shelves as addressable URLs
   (`/store/apps/collection/cluster?gsr=…`), all of them present on page 1.
   `--pages N` follows them, and the run stops on DATA — a fetch that added no
-  new package id — never on a selector. Because the addresses are known after
-  page 1, `--concurrency` is available on these modes.
+  new package id — never on a selector. Pages are fetched one at a time:
+  `--concurrency` above 1 is not implemented in this repo and is refused
+  (exit 2) rather than silently ignored.
 * **Search does not paginate at all.** Measured in a real browser, scrolling
   to the bottom four times per query and re-counting: `game` 22 results,
   `vpn` 30, `a` 50, with the page height unchanged across every round and
@@ -188,8 +193,8 @@ package ids were identical.
 | engine | install | notes |
 |---|---|---|
 | **Playwright** (primary) | `requirements-playwright.txt` | the one to use |
-| Selenium | `requirements-selenium.txt` | no authenticated remote CDP endpoint; `--proxy-server` cannot authenticate at all, so credentials are stripped and a warning printed; exposes no HTTP status, so classification leans on the structural signals |
-| pyppeteer | `requirements-puppeteer.txt` | effectively unmaintained upstream; here for parity |
+| Selenium | `requirements-selenium.txt` | no authenticated remote CDP endpoint (`--cdp-endpoint` is refused, exit 2); `--proxy-server` cannot authenticate at all, so credentials are stripped and a warning printed; exposes no HTTP status, so classification leans on the structural signals (Play's own 404 template is recognised from its body); `--fingerprint` is refused |
+| pyppeteer | `requirements-puppeteer.txt` | effectively unmaintained upstream; here for parity; `--fingerprint` is refused |
 | Scraping Browser API | `--cdp-endpoint` | a managed browser; never stack `--proxy` or `--fingerprint` on it |
 
 **Install exactly one per virtualenv.** Playwright and pyppeteer declare
@@ -216,7 +221,23 @@ apps · `5` **the content was never obtained** · `6` partial.
 must not report "the catalogue is empty", or a dead proxy and an empty
 category look the same to whatever reads the file. A run that gathered
 nothing and did not finish reports `5` and **writes no file at all**, so last
-night's good output is still there.
+night's good output is still there. A run that gathered rows and THEN failed
+(a timeout on page 2, a refused reviews call) reports `6` and writes what it
+has, with the failed pages named in the sidecar.
+
+Retries, per page: `--retries N` is EXTRA attempts after the first on a
+transport failure or a page nothing recognises (`0` means one attempt); a
+refused page gets `--proxy-block-retries` fresh browsers — the next exit when
+there is a `--proxy-file` pool — without spending `--retries`; a bare HTTP 429
+waits at the same exit instead. Counts that cannot run (`--pages 0`, a
+negative `--retries`) are a usage error, exit 2.
+
+Output files are written to a temporary file beside the target and renamed
+into place, so an interrupted write leaves the previous file whole. In the
+CSV only, a text cell beginning with `=`, `+`, `-`, `@`, a tab or a line break
+is prefixed with `'` so a spreadsheet does not run it as a formula; the JSON
+keeps the store's text exactly, and the sidecar's `csv_cells_escaped` says how
+many cells differ.
 
 ## Traps that look like bugs
 
@@ -225,7 +246,8 @@ night's good output is still there.
   show it. It is the store moving, not the scraper.
 * **A package id that does not exist gives exit 4, not exit 3.** Play answers
   it with a clean HTTP 404, and this scraper calls that `not_found` — an
-  answer, not a refusal. Check the id before you check your proxy.
+  answer, not a refusal, on all three engines. Check the id before you check
+  your proxy.
 * **`genre_id` is null on every listing row, and that is the store.** A grid
   tile publishes the genre only as display text ("Casual", "Arcade") — it
   carries no locale-independent key at all, measured across the capture set.

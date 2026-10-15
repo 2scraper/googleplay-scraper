@@ -731,18 +731,43 @@ def test_policy_constants_have_consumers():
     justification and no engine consulted it, so setting it False changed
     nothing while the prose read like enforcement.
     """
+    import ast
     ok = True
-    consumers = "\n".join(filter(None, (_read(n) for n in SHIPPED_PY
-                                        if n != "page_flow.py")))
-    own = _read("page_flow.py") or ""
-    for constant in ("RETRY_ON_BLOCKED", "BLOCK_RETRIES_WITHOUT_POOL",
-                     "SOLVES_PER_PAGE", "SEARCH_IS_PAGINATED",
-                     "THROTTLE_BACKOFF_MS"):
-        used_elsewhere = constant in consumers
-        used_via_helper = own.count(constant) >= 2
-        ok &= check(f"[policy] {constant} is actually read",
-                    used_elsewhere or used_via_helper,
-                    "no consumer outside its own definition")
+    # What counts as a consumer is a CALL (or attribute read) of
+    # `page_flow.<name>` in shipped code outside page_flow and this suite —
+    # not the name appearing somewhere. The old version of this check passed
+    # for a constant whose helper nothing called, and for one mentioned only
+    # in another module's docstring.
+    used = set()
+    for name in SHIPPED_PY:
+        if name in ("page_flow.py", "smoke_test.py"):
+            continue
+        src = _read(name)
+        if not src:
+            continue
+        for node in ast.walk(ast.parse(src)):
+            if (isinstance(node, ast.Attribute)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "page_flow"):
+                used.add(node.attr)
+    # Each policy constant, and the helper through which it is enforced.
+    for constant, helper in (("RETRY_ON_BLOCKED", "block_retries"),
+                             ("BLOCK_RETRIES_WITHOUT_POOL", "block_retries"),
+                             ("SOLVES_PER_PAGE", "SolveBudget"),
+                             ("SEARCH_IS_PAGINATED", "warn_unpaginated"),
+                             ("THROTTLE_BACKOFF_MS", "throttle_delay_ms"),
+                             ("THROTTLE_RETRIES", "THROTTLE_RETRIES")):
+        ok &= check(f"[policy] {constant} is enforced ({helper} has a caller)",
+                    helper in used, "nothing outside page_flow reaches it")
+    # And every public function page_flow defines is reached from outside it.
+    # `solve_budget` is the one exception, and only because SolveBudget, which
+    # IS reached, is its caller.
+    tree = ast.parse(_read("page_flow.py") or "")
+    for node in tree.body:
+        if (isinstance(node, (ast.FunctionDef, ast.ClassDef))
+                and not node.name.startswith("_") and node.name != "solve_budget"):
+            ok &= check(f"[policy] page_flow.{node.name} has a consumer",
+                        node.name in used, "dead policy reads like enforcement")
     ok &= check("[policy] every state has a policy row",
                 set(page_flow.STATE_POLICY) == set(parser.PAGE_STATES),
                 f"{sorted(page_flow.STATE_POLICY)} vs {sorted(parser.PAGE_STATES)}")
@@ -772,7 +797,8 @@ def test_env_example_matches_what_the_code_reads():
     if text is None:
         ok &= check("[env] .env.example exists", False)
         return ok
-    documented = set(re.findall(r"^([A-Z][A-Z0-9_]*)=", text, re.M))
+    # A variable may be documented commented out (`# NAME=example`).
+    documented = set(re.findall(r"^(?:#\s*)?([A-Z][A-Z0-9_]*)=", text, re.M))
     read = set(env_config.ENV_KEYS)
     ok &= check("[env] every variable the code reads is documented",
                 read <= documented, f"missing {sorted(read - documented)}")
@@ -809,10 +835,11 @@ def test_a_copied_env_example_reads_as_unset():
                 value = env_config.env_value(var)
                 ok &= check(f"[env] a copied example leaves {var} unset",
                             not value, repr(value))
-            # ...while a non-credential default stays usable.
+            # ...and the start URL is documented commented out, so a copied
+            # example does not decide what a run reads.
             url = env_config.env_value("GOOGLEPLAY_URL")
-        ok &= check("[env] and keeps the non-credential default usable",
-                    bool(url) and "play.google.com" in url, repr(url))
+        ok &= check("[env] a copied example sets no start URL", not url,
+                    repr(url))
         ok &= check("[env] the warning names the variable, not the value",
                     "GOOGLEPLAY_PROXY" in buf.getvalue()
                     and "{password}" not in buf.getvalue())
@@ -1156,6 +1183,532 @@ def test_scraper_api_waitfor_object_and_http_code():
 
 
 
+# ==========================================================================
+# The run contract, driven end to end with a fake driver
+# ==========================================================================
+#
+# These go through `engine_core.main()` exactly as an engine does, with a
+# driver that answers from the real captures. They need no engine library,
+# so they run in every venv — including CI's offline job, where no engine is
+# installed and an engine-gated check would skip.
+
+class _FakeDriver:
+    """Answers `fetch` from a script; records what was asked."""
+
+    def __init__(self, world, proxy):
+        self.world = world
+        self.proxy = proxy
+        self._url = ""
+
+    def fetch(self, url, mode):
+        self.world["fetches"].append((url, self.proxy))
+        step = self.world["pages"].pop(0) if len(self.world["pages"]) > 1 \
+            else self.world["pages"][0]
+        if isinstance(step, BaseException):
+            raise step
+        self._url = url
+        self.world["current"] = step
+        return step
+
+    def read(self, mode):
+        after = self.world.get("after_solve")
+        return after if after is not None else self.world["current"][0]
+
+    def evaluate(self, js, arg=None):
+        import captcha_solver
+        if js == captcha_solver.RECAPTCHA_DISCOVERY_JS:
+            return self.world.get("discovery")
+        self.world["injected"].append(arg)
+        return True
+
+    def post_form(self, url, form):
+        step = self.world["posts"].pop(0)
+        if isinstance(step, BaseException):
+            raise step
+        return step
+
+    def current_url(self):
+        return self._url
+
+    def close(self):
+        self.world["closed"] += 1
+
+
+def _run_main(argv, pages, posts=(), discovery=None, after_solve=None,
+              launch_error=None, env=None):
+    """`(rc, world, out_prefix_files)` for one `engine_core.main` run."""
+    import engine_core
+    world = {"pages": list(pages), "posts": list(posts), "fetches": [],
+             "launches": [], "closed": 0, "injected": [], "current": None,
+             "discovery": discovery, "after_solve": after_solve}
+
+    def launch(args, proxy_url):
+        world["launches"].append(proxy_url)
+        if launch_error is not None:
+            raise launch_error
+        return _FakeDriver(world, proxy_url)
+
+    saved_sleep = engine_core._sleep
+    engine_core._sleep = lambda seconds: world.setdefault("slept", []).append(seconds)
+    saved_env = {k: os.environ.get(k) for k in (env or {})}
+    os.environ.update(env or {})
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = os.path.join(tmp, "o")
+            buf = io.StringIO()
+            with redirect_stdout(buf), redirect_stderr(buf):
+                try:
+                    rc = engine_core.main(launch, list(argv) + ["--out", prefix,
+                                                                "--format", "both"])
+                except SystemExit as exc:
+                    rc = exc.code
+            world["log"] = buf.getvalue()
+            files = {}
+            for ext in (".json", ".csv", ".meta.json"):
+                if os.path.exists(prefix + ext):
+                    with open(prefix + ext, encoding="utf-8") as fh:
+                        files[ext] = fh.read()
+            return rc, world, files
+    finally:
+        engine_core._sleep = saved_sleep
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+_BLOCKED_PAGE = ("<html><body><div>Our systems have detected unusual traffic "
+                 "from your computer network.</div><div class=\"g-recaptcha\">"
+                 "</div></body></html>")
+_SITEKEY = "6L" + "x" * 38
+_DISCOVERY = {"found": True, "sitekey": _SITEKEY, "size": "normal",
+              "renderParam": "explicit", "hints": []}
+
+
+def test_run_contract_proxy_and_partial_rows():
+    """`--proxy` runs, and rows gathered before a later failure are kept."""
+    ok = True
+    grid = capture("cat_game_us.html")
+    if grid is None:
+        skip("run-contract", "captures/cat_game_us.html absent")
+        return True
+
+    # A proxy used to crash before the first fetch (`pool.next()` does not
+    # exist on ProxyPool) — a traceback and exit 1 on every --proxy run.
+    rc, world, files = _run_main(
+        ["--mode", "listing", "--category", "GAME", "--proxy",
+         "http://user:pass@10.0.0.1:8080"], [(grid, 200)])
+    ok &= check("[contract] --proxy runs to completion", rc == 0,
+                f"rc={rc} {world['log'][-400:]}")
+    ok &= check("[contract] the browser is launched on that proxy",
+                world["launches"][:1] == ["http://user:pass@10.0.0.1:8080"],
+                str(world["launches"]))
+    ok &= check("[contract] the proxy password never reaches the log",
+                "user:pass@" not in world["log"])
+
+    with tempfile.TemporaryDirectory() as tmp:
+        plist = os.path.join(tmp, "proxies.txt")
+        with open(plist, "w") as fh:
+            fh.write("http://10.0.0.1:8080\nhttp://10.0.0.2:8080\n")
+        rc, world, _ = _run_main(
+            ["--mode", "listing", "--category", "GAME", "--proxy-file", plist,
+             "--pages", "2"], [(grid, 200), (grid, 200)])
+        ok &= check("[contract] --proxy-file runs", rc in (0, 6),
+                    f"rc={rc} {world['log'][-400:]}")
+        ok &= check("[contract] per-page rotation is a fresh browser on the "
+                    "next exit", world["launches"][:2] ==
+                    ["http://10.0.0.1:8080", "http://10.0.0.2:8080"],
+                    str(world["launches"]))
+
+    # Page 2 dies after page 1 gave 64 apps: exit 6 with the rows written,
+    # not exit 5 with everything thrown away.
+    rc, world, files = _run_main(
+        ["--mode", "listing", "--category", "GAME", "--pages", "3",
+         "--retries", "0"], [(grid, 200), TimeoutError("page 2 timed out")])
+    meta = json.loads(files.get(".meta.json", "{}"))
+    ok &= check("[contract] a failure after rows is exit 6", rc == 6,
+                f"rc={rc} {world['log'][-400:]}")
+    ok &= check("[contract] and the gathered rows are written",
+                len(json.loads(files.get(".json", "[]"))) > 0)
+    ok &= check("[contract] and the sidecar says partial, naming page 2",
+                meta.get("status") == "partial" and meta.get("pages_failed") == [2],
+                str(meta))
+    return ok
+
+
+def test_run_contract_exit_codes_per_state():
+    """Each thing a page can be gets its documented exit code."""
+    ok = True
+    notfound = capture("notfound.html")
+    app = capture("app_free_us.html")
+    if notfound is None or app is None:
+        skip("run-contract", "captures absent")
+        return True
+    app_args = ["--mode", "app", "--app-id", "com.example.nothere"]
+
+    # A package id that does not exist is an answer: exit 4, as the README
+    # says. It used to be 5 ("never obtained").
+    rc, world, _ = _run_main(app_args, [(notfound, 404)])
+    ok &= check("[contract] a 404 for the app is exit 4", rc == 4, f"rc={rc}")
+    # The same page with no status (Selenium) used to read as blocked, exit 3.
+    rc, world, _ = _run_main(app_args, [(notfound, None)])
+    ok &= check("[contract] the same 404 with no status is exit 4", rc == 4,
+                f"rc={rc} {world['log'][-300:]}")
+    # A served shell with the store's images and no apps: an empty answer.
+    shell = ("<html>" + "<img src=\"https://play-lh.googleusercontent.com/x\">" * 30
+             + "</html>")
+    rc, world, _ = _run_main(["--mode", "listing", "--category", "GAME"],
+                             [(shell, 200)])
+    ok &= check("[contract] a served page with no apps is exit 4", rc == 4,
+                f"rc={rc}")
+    # A refusal: exit 3, after the block retry.
+    rc, world, _ = _run_main(["--mode", "listing", "--category", "GAME",
+                              "--solve-captcha", "never"],
+                             [(_BLOCKED_PAGE, 200)])
+    ok &= check("[contract] a refusal is exit 3", rc == 3, f"rc={rc}")
+    ok &= check("[contract] and the block retry is a fresh browser",
+                len(world["launches"]) == 1 + page_flow.BLOCK_RETRIES_WITHOUT_POOL,
+                str(world["launches"]))
+    # The launch itself failing: never obtained, exit 5.
+    rc, world, _ = _run_main(["--mode", "listing", "--category", "GAME"], [],
+                             launch_error=RuntimeError("no browser"))
+    ok &= check("[contract] a browser that never came up is exit 5", rc == 5,
+                f"rc={rc}")
+    # --retries is EXTRA attempts: an unknown page is fetched 1 + N times.
+    rc, world, _ = _run_main(["--mode", "listing", "--category", "GAME",
+                              "--retries", "2"], [("", 503)])
+    ok &= check("[contract] --retries 2 makes three attempts",
+                len(world["fetches"]) == 3, str(len(world["fetches"])))
+    ok &= check("[contract] and a page never obtained is exit 5", rc == 5,
+                f"rc={rc}")
+    # A refusal raised by an engine's launch (Selenium + --cdp-endpoint) is a
+    # usage error, not a crash.
+    import engine_core
+    rc, world, _ = _run_main(["--mode", "listing", "--category", "GAME"], [],
+                             launch_error=engine_core.UsageError("no CDP here"))
+    ok &= check("[contract] an engine's UsageError is exit 2", rc == 2,
+                f"rc={rc}")
+    return ok
+
+
+def test_run_contract_reviews_refusal_is_not_an_end():
+    """A refused `batchexecute` call is a failed page, never "complete"."""
+    ok = True
+    app = capture("app_free_us.html")
+    if app is None:
+        skip("run-contract", "captures/app_free_us.html absent")
+        return True
+    args = ["--mode", "reviews", "--app-id", "com.whatsapp", "--pages", "3"]
+    for label, post in (
+            ("a refusal body", (_BLOCKED_PAGE, 429)),
+            ("an empty body", ("", 200))):
+        rc, world, files = _run_main(args, [(app, 200)], posts=[post])
+        meta = json.loads(files.get(".meta.json", "{}"))
+        ok &= check(f"[contract] reviews: {label} on page 2 is exit 6",
+                    rc == 6, f"rc={rc} {meta.get('stop_reason')}")
+        ok &= check(f"[contract] reviews: {label} keeps page 1's rows",
+                    meta.get("status") == "partial" and meta.get("products", 0) > 0,
+                    str(meta))
+    return ok
+
+
+def test_run_contract_captcha_budget():
+    """At most one paid solve per page, whatever retries and rotations do."""
+    ok = True
+    import captcha_solver
+    calls = []
+    saved = captcha_solver.solve_recaptcha
+
+    def stub(challenge, key, api_version="v2", min_score=0.3):
+        calls.append(challenge.sitekey)
+        return "TOKEN"
+
+    captcha_solver.solve_recaptcha = stub
+    try:
+        key = "a" * 31 + "b"
+        with tempfile.TemporaryDirectory() as tmp:
+            plist = os.path.join(tmp, "p.txt")
+            with open(plist, "w") as fh:
+                fh.write("http://10.0.0.1:1\nhttp://10.0.0.2:1\nhttp://10.0.0.3:1\n")
+            # The page stays refused after the solve, and a pool of three
+            # gives it three more fresh browsers. One purchase, not four.
+            rc, world, _ = _run_main(
+                ["--mode", "listing", "--category", "GAME", "--proxy-file",
+                 plist, "--twocaptcha-key", key, "--retries", "2"],
+                [(_BLOCKED_PAGE, 429)], discovery=_DISCOVERY)
+        ok &= check("[captcha] one page buys at most one solve",
+                    len(calls) == page_flow.SOLVES_PER_PAGE,
+                    f"{len(calls)} solves, {len(world['fetches'])} fetches")
+        ok &= check("[captcha] the token bought was injected",
+                    world["injected"] == ["TOKEN"], str(world["injected"]))
+        ok &= check("[captcha] and the page still refused is exit 3", rc == 3,
+                    f"rc={rc}")
+
+        # A solve that clears the page: the run continues on what it led to.
+        calls.clear()
+        grid = capture("cat_game_us.html")
+        if grid is not None:
+            rc, world, _ = _run_main(
+                ["--mode", "listing", "--category", "GAME", "--twocaptcha-key",
+                 key], [(_BLOCKED_PAGE, 200)], discovery=_DISCOVERY,
+                after_solve=grid)
+            ok &= check("[captcha] a cleared challenge yields the page's rows",
+                        rc == 0 and len(calls) == 1, f"rc={rc} solves={len(calls)}")
+
+        # No key: nothing bought, still exit 3.
+        calls.clear()
+        rc, world, _ = _run_main(["--mode", "listing", "--category", "GAME"],
+                                 [(_BLOCKED_PAGE, 200)], discovery=_DISCOVERY)
+        ok &= check("[captcha] no key, no purchase", not calls and rc == 3,
+                    f"rc={rc} solves={len(calls)}")
+        # --solve-captcha never: nothing bought even with a key.
+        rc, world, _ = _run_main(["--mode", "listing", "--category", "GAME",
+                                  "--twocaptcha-key", key, "--solve-captcha",
+                                  "never"],
+                                 [(_BLOCKED_PAGE, 200)], discovery=_DISCOVERY)
+        ok &= check("[captcha] --solve-captcha never buys nothing", not calls,
+                    f"solves={len(calls)}")
+    finally:
+        captcha_solver.solve_recaptcha = saved
+    return ok
+
+
+def test_cli_rejects_counts_that_cannot_run():
+    """A count that cannot run is exit 2 naming the flag, in every engine.
+
+    `--pages 0` used to fetch nothing and report exit 4 — the catalogue is
+    empty — about a run that never asked. The engines share this CLI, so
+    one check covers all three.
+    """
+    ok = True
+    base = ["--mode", "listing", "--category", "GAME"]
+    for flag, value in (("--pages", "0"), ("--pages", "-1"),
+                        ("--reviews-per-call", "0"), ("--retries", "-1"),
+                        ("--delay", "-1"), ("--retry-delay", "-2"),
+                        ("--concurrency", "0"), ("--proxy-block-retries", "-1"),
+                        ("--min-score", "2")):
+        rc, world, _ = _run_main(base + [flag, value], [])
+        ok &= check(f"[cli] {flag} {value} is a usage error naming the flag",
+                    rc == 2 and "error:" in world["log"] and flag in world["log"]
+                    and not world["fetches"],
+                    f"rc={rc} {world['log'][-200:]}")
+    rc, world, _ = _run_main(base + ["--retries", "0"],
+                             [(capture("cat_game_us.html") or "", 200)])
+    ok &= check("[cli] --retries 0 still makes one attempt",
+                len(world["fetches"]) == 1, str(len(world["fetches"])))
+    rc, world, _ = _run_main(base + ["--concurrency", "2"], [])
+    ok &= check("[cli] --concurrency above 1 is refused, not ignored",
+                rc == 2 and not world["fetches"], f"rc={rc}")
+    rc, world, _ = _run_main(base + ["--fingerprint"], [])
+    ok &= check("[cli] --fingerprint without a key is refused", rc == 2,
+                f"rc={rc}")
+    rc, world, _ = _run_main(base + ["--proxy-rotate", "on-block"], [])
+    ok &= check("[cli] --proxy-rotate offers only what the pool accepts",
+                rc == 2, f"rc={rc}")
+    return ok
+
+
+def test_env_url_does_not_override_a_typed_builder_flag():
+    """GOOGLEPLAY_URL in `.env` must not replace a --category the user typed."""
+    ok = True
+    grid = capture("cat_game_us.html") or ""
+    env = {"GOOGLEPLAY_URL": "https://play.google.com/store/apps/category/TOOLS"}
+    rc, world, _ = _run_main(["--mode", "listing", "--category", "GAME"],
+                             [(grid, 200)], env=env)
+    asked = world["fetches"][0][0] if world["fetches"] else ""
+    ok &= check("[env] --category GAME fetches GAME, not the .env URL",
+                "/category/GAME" in asked, asked)
+    rc, world, _ = _run_main(["--mode", "search", "--query", "vpn"],
+                             [(capture("search_vpn_us.html") or "", 200)], env=env)
+    ok &= check("[env] --mode search --query is not a usage error under it",
+                rc != 2, f"rc={rc} {world['log'][-200:]}")
+    return ok
+
+
+def test_output_writes_are_atomic_and_keep_modes():
+    """A failed write leaves the previous file whole; modes follow the umask."""
+    ok = True
+    import output_writer as ow
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "o.json")
+        ow.write_json([App(sku="a", title="good")], path)
+        before = open(path, encoding="utf-8").read()
+        saved = ow.json.dump
+
+        def explode(*a, **k):
+            a[1].write('[{"partial": ')
+            raise OSError("disk full")
+
+        ow.json.dump = explode
+        try:
+            try:
+                ow.write_json([App(sku="b")], path)
+            except OSError:
+                pass
+            try:
+                ow.write_run_meta(os.path.join(tmp, "o"), {"status": "x"})
+            except OSError:
+                pass
+        finally:
+            ow.json.dump = saved
+        ok &= check("[write] an interrupted write leaves the old file whole",
+                    open(path, encoding="utf-8").read() == before)
+        ok &= check("[write] and no sidecar half-written",
+                    not os.path.exists(os.path.join(tmp, "o.meta.json")))
+        ok &= check("[write] and no temp file left behind",
+                    sorted(os.listdir(tmp)) == ["o.json"], str(os.listdir(tmp)))
+
+        for umask in (0o022, 0o002, 0o077):
+            old = os.umask(umask)
+            try:
+                p = os.path.join(tmp, f"m{umask:o}.csv")
+                ow.write_csv([App(sku="a")], p)
+                mode = os.stat(p).st_mode & 0o777
+            finally:
+                os.umask(old)
+            ok &= check(f"[write] a new file under umask {umask:03o} is "
+                        f"{0o666 & ~umask:03o}", mode == 0o666 & ~umask,
+                        f"{mode:03o}")
+        p = os.path.join(tmp, "keep.json")
+        ow.write_json([], p)
+        os.chmod(p, 0o640)
+        ow.write_json([App(sku="a")], p)
+        ok &= check("[write] an existing file keeps its mode",
+                    os.stat(p).st_mode & 0o777 == 0o640)
+    return ok
+
+
+def test_csv_neutralises_formula_cells():
+    ok = True
+    import csv as _csv
+    with tempfile.TemporaryDirectory() as tmp:
+        prefix = os.path.join(tmp, "f")
+        rows = [App(sku="a", title="=HYPERLINK(\"http://x\")", brand="+cmd|' /C calc'!A0",
+                    description="@SUM(1)", price=-5.0, category="Arcade"),
+                App(sku="b", title="\tTabbed", brand="-dash", description="ok")]
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            output_writer.finish_run(rows, prefix, "both", False, blocked=False,
+                                     stop_reason="completed", pages_requested=1,
+                                     pages_completed=1, start_url="u",
+                                     final_url="u", mode="listing",
+                                     extra={"gl": "US"})
+        with open(prefix + ".csv", encoding="utf-8", newline="") as fh:
+            got = list(_csv.DictReader(fh))
+        data = json.load(open(prefix + ".json", encoding="utf-8"))
+        meta = json.load(open(prefix + ".meta.json", encoding="utf-8"))
+    ok &= check("[csv] a formula cell is prefixed",
+                got[0]["title"].startswith("'=") and got[0]["brand"].startswith("'+")
+                and got[0]["description"].startswith("'@")
+                and got[1]["title"].startswith("'\t")
+                and got[1]["brand"] == "'-dash", str(got[0])[:200])
+    ok &= check("[csv] a negative NUMBER stays a number", got[0]["price"] == "-5.0",
+                got[0]["price"])
+    ok &= check("[csv] a plain cell is untouched", got[0]["category"] == "Arcade")
+    ok &= check("[csv] JSON keeps the site's bytes",
+                data[0]["title"] == "=HYPERLINK(\"http://x\")")
+    ok &= check("[csv] the sidecar counts the escaped cells",
+                meta.get("csv_cells_escaped") == 5, str(meta.get("csv_cells_escaped")))
+    with tempfile.TemporaryDirectory() as tmp:
+        prefix = os.path.join(tmp, "g")
+        with redirect_stdout(io.StringIO()):
+            output_writer.finish_run(rows, prefix, "csv", False, blocked=False,
+                                     stop_reason="completed", pages_requested=1,
+                                     pages_completed=1, start_url="u",
+                                     final_url="u", mode="listing",
+                                     extra={"csv_cells_escaped": "caller"})
+        meta = json.load(open(prefix + ".meta.json", encoding="utf-8"))
+    ok &= check("[csv] the count merges UNDER the caller's extra",
+                meta.get("csv_cells_escaped") == "caller")
+    return ok
+
+
+def test_redaction_and_empty_documents():
+    ok = True
+    import engine_core
+    text = engine_core._redact("ProxyError http://u:supersecret@1.2.3.4:8080 and "
+                               "ws://login:supersecret@cb.2captcha.com:9222 key=abc")
+    ok &= check("[redact] proxy and CDP credentials are masked",
+                "supersecret" not in text and "abc" not in text,
+                text)
+    state, reason = parser.detect_page_state("", None, "", "grid")
+    ok &= check("[state] an empty document is unknown, not blocked",
+                state == "unknown", f"{state} ({reason})")
+    return ok
+
+
+def test_no_private_citations():
+    """Public files state their rules in their own words.
+
+    The tokens are ASSEMBLED from pieces so this file does not match itself.
+    """
+    ok = True
+    banned = ("CLAUDE" + ".md", "claude_" + "2scraper", "2scraper_" + "repo_rules",
+              "play" + "book", chr(0xA7))
+    try:
+        listed = subprocess.run(["git", "ls-files"], cwd=HERE, capture_output=True,
+                                text=True, check=True).stdout.split()
+    except (OSError, subprocess.CalledProcessError):
+        listed = list(SHIPPED_TEXT)
+    scanned = 0
+    for name in listed:
+        if name.startswith("captures/") or name.endswith((".png", ".ico")):
+            continue
+        text = _read(name)
+        if text is None:
+            continue
+        scanned += 1
+        for token in banned:
+            ok &= check(f"[citations] {name} cites no private document",
+                        token not in text, repr(token))
+    ok &= check("[citations] the scan read something", scanned >= 10, str(scanned))
+    return ok
+
+
+def test_diff_refuses_two_markets_in_one_currency():
+    """DE and FR are both EUR; their ratings are not comparable."""
+    ok = True
+    import argparse as _ap
+    import diff_runs
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = {}
+        for gl in ("DE", "FR"):
+            p = os.path.join(tmp, gl + ".json")
+            with open(p, "w", encoding="utf-8") as fh:
+                json.dump([{"sku": "a", "currency": "EUR", "gl": gl, "rating": 4.1}], fh)
+            paths[gl] = p
+        args = _ap.Namespace(old=paths["DE"], new=paths["FR"], force=False)
+        buf = io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(buf):
+            verdict = diff_runs._check_comparable(args)
+        ok &= check("[diff] two markets sharing a currency are refused",
+                    verdict is False and "different markets" in buf.getvalue(),
+                    buf.getvalue()[-300:])
+    return ok
+
+
+def test_workflows_import_no_local_module_inline():
+    """A workflow step calls ci_checks.py; it does not re-implement it.
+
+    An inline heredoc that imports the row class is a second copy of a check,
+    and nothing local ever runs a workflow, so it can only fail on a push.
+    """
+    ok = True
+    wf_dir = os.path.join(HERE, ".github", "workflows")
+    if not os.path.isdir(wf_dir):
+        skip("workflows", "no .github/ in this tree (the image)")
+        return True
+    local = [n[:-3] for n in SHIPPED_PY]
+    pattern = re.compile(r"^\s*(?:from|import)\s+(" + "|".join(local) + r")\b", re.M)
+    for name in sorted(os.listdir(wf_dir)):
+        text = _read(os.path.join(".github", "workflows", name)) or ""
+        hit = pattern.search(text)
+        ok &= check(f"[workflows] {name} imports no local module inline",
+                    hit is None, hit.group(0).strip() if hit else "")
+    return ok
+
+
 def main():
     tests = [
         test_row_schema,
@@ -1187,6 +1740,18 @@ def main():
         test_credential_scan_sees_into_a_virtualenv_and_a_fixture,
         test_gitignore_covers_every_env_spelling,
         test_scraper_api_waitfor_object_and_http_code,
+        test_run_contract_proxy_and_partial_rows,
+        test_run_contract_exit_codes_per_state,
+        test_run_contract_reviews_refusal_is_not_an_end,
+        test_run_contract_captcha_budget,
+        test_cli_rejects_counts_that_cannot_run,
+        test_env_url_does_not_override_a_typed_builder_flag,
+        test_output_writes_are_atomic_and_keep_modes,
+        test_csv_neutralises_formula_cells,
+        test_redaction_and_empty_documents,
+        test_no_private_citations,
+        test_diff_refuses_two_markets_in_one_currency,
+        test_workflows_import_no_local_module_inline,
     ]
     ok = True
     for test in tests:

@@ -17,13 +17,14 @@ obvious. A sibling repo in this family set a user agent through pyppeteer's
 CDP override and found the site serving navigation 1 and refusing navigations
 2 to 4 — including when the claimed UA agreed with the real platform, so it
 was the override rather than the value. Nothing here overrides the browser's
-own identity, and `--fingerprint` warns instead of half-applying one.
+own identity, and `--fingerprint` is refused (exit 2) rather than
+half-applied.
 """
 
 import asyncio
 import sys
 import urllib.parse
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 # Module level on purpose — see the note in playwright_scraper.py.
 from pyppeteer import launch as pyppeteer_launch
@@ -43,7 +44,7 @@ _POST_FORM_JS = """
   headers: {'content-type': 'application/x-www-form-urlencoded;charset=UTF-8'},
   body: body,
   credentials: 'include'
-}).then(r => r.text())
+}).then(r => r.text().then(t => ({status: r.status, text: t})))
 """
 
 
@@ -63,11 +64,21 @@ class PuppeteerDriver:
             url, timeout=engine_core.DEFAULT_TIMEOUT_MS,
             waitUntil="domcontentloaded"))
         status = response.status if response is not None else None
+        return self.read(mode), status
+
+    def read(self, mode: str) -> str:
+        """Wait for the page as it is now to paint, then return its markup."""
         page_flow.wait_for_count(
             self._count, lambda ms: self._run(asyncio.sleep(ms / 1000.0)),
             page_flow.ready_selector(mode), page_flow.min_matches(mode),
             page_flow.content_timeout_ms(mode))
-        return self._run(self._page.content()), status
+        return self._run(self._page.content())
+
+    def evaluate(self, js: str, arg: Any = None) -> Any:
+        """Run an `() => expr` or `(arg) => expr` function in the page."""
+        if arg is None:
+            return self._run(self._page.evaluate(js))
+        return self._run(self._page.evaluate(js, arg))
 
     def _count(self, selector: str) -> int:
         """How many nodes match, with a destroyed context counted as none.
@@ -90,12 +101,14 @@ class PuppeteerDriver:
         except Exception:
             return 0
 
-    def post_form(self, url: str, form: Dict[str, str]) -> str:
+    def post_form(self, url: str, form: Dict[str, str]) -> Tuple[str, Optional[int]]:
+        """`(body, status)` — the status so a refusal is not read as an end."""
         body = urllib.parse.urlencode(form)
         if "play.google.com" not in (self._page.url or ""):
             self._run(self._page.goto("https://play.google.com/store/apps",
                                       waitUntil="domcontentloaded"))
-        return self._run(self._page.evaluate(_POST_FORM_JS, url, body)) or ""
+        result = self._run(self._page.evaluate(_POST_FORM_JS, url, body)) or {}
+        return result.get("text") or "", result.get("status")
 
     def current_url(self) -> str:
         return self._page.url or ""
@@ -129,10 +142,13 @@ def launch(args, proxy_url: Optional[str]) -> PuppeteerDriver:
         launch_args.append(f"--lang={args.locale}")
 
     if args.fingerprint:
-        print("[warn] --fingerprint is not applied on the pyppeteer engine: a "
-              "bare CDP user-agent override leaves the client hints reporting "
-              "the real browser, and a sibling site refused every navigation "
-              "after the first because of exactly that", file=sys.stderr)
+        # Refused rather than warned about: a run that carries on without the
+        # identity the caller asked for is the flag doing nothing.
+        raise engine_core.UsageError(
+            "--fingerprint is not available on the pyppeteer engine: a bare "
+            "CDP user-agent override leaves the client hints reporting the "
+            "real browser, and a sibling site refused every navigation after "
+            "the first because of exactly that. Use the Playwright engine.")
 
     browser = loop.run_until_complete(pyppeteer_launch(
         headless=args.headless, args=launch_args,

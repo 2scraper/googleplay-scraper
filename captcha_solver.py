@@ -1,13 +1,14 @@
 """
 captcha_solver.py
 ------------------
-Shared helper used by all three scrapers (Playwright / Selenium / Puppeteer).
+Shared helper used by all three scrapers (Playwright / Selenium / Puppeteer),
+called from ONE place: `engine_core._solve()`.
 
-Detection runs after EVERY page navigation in the main loop of all three
-scrapers, regardless of what URL was requested (category hub, product page,
-sign-in, checkout, anything) — this is deliberate, not scoped to any one
-page. If Google Play renders a reCAPTCHA challenge anywhere — account, sign-in
-and checkout flows are the usual places — this fires.
+Detection runs on every page the run classified as refused
+(`--solve-captcha when-blocked`, the default), or on every page that is not
+plain content with `--solve-captcha always`, whatever route was requested.
+A purchase goes through `page_flow.SolveBudget` first — one per page, not
+reset by a retry or a fresh exit.
 
 **No captcha has been met on this site.** Counted across all twelve
 captures in `captures/` (2026-09-22, one datacentre address, plain `curl`):
@@ -172,9 +173,8 @@ def detect_recaptcha_v3(html: str, page_url: str) -> Optional[CaptchaChallenge]:
        attributes (data-captcha-type="recaptcha" data-version="v3"
        data-sitekey="..." data-action="..."), with the actual execute()
        call happening inside a bundled JS file, never appearing as
-       readable inline script text at all — confirmed live on the sibling
-       farfetch-scraper repo's target, in its sign-up modal, via DevTools
-       inspection. A previous version of this
+       readable inline script text at all — confirmed live on a sibling
+       repo's site, in a sign-up modal, via DevTools inspection. A previous version of this
        function, which only checked for format 1, reported "no captcha"
        on this exact page despite one being genuinely present — caught by
        manually inspecting the DOM, not by the detector itself, which is
@@ -223,7 +223,7 @@ def detect_recaptcha_v3(html: str, page_url: str) -> Optional[CaptchaChallenge]:
 
 # ---------------------------------------------------------------------------
 # Runtime detection (added 2026-08-24 — the static-HTML detector below no
-# longer matched the sibling farfetch-scraper repo's target)
+# longer matched a sibling repo's site)
 # ---------------------------------------------------------------------------
 #
 # What changed there: the sign-up modal used to render

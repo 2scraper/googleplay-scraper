@@ -62,22 +62,34 @@ class PlaywrightDriver:
         response = self._page.goto(url, timeout=engine_core.DEFAULT_TIMEOUT_MS,
                                    wait_until="domcontentloaded")
         status = response.status if response is not None else None
+        return self.read(mode), status
+
+    def read(self, mode: str) -> str:
+        """Wait for the page as it is now to paint, then return its markup."""
         page_flow.wait_for_count(
             lambda sel: self._page.locator(sel).count(),
             lambda ms: self._page.wait_for_timeout(ms),
             page_flow.ready_selector(mode), page_flow.min_matches(mode),
             page_flow.content_timeout_ms(mode))
-        return self._page.content(), status
+        return self._page.content()
 
-    def post_form(self, url: str, form: Dict[str, str]) -> str:
-        """POST from inside the browser's own session.
+    def evaluate(self, js: str, arg: Any = None) -> Any:
+        """Run an `() => expr` or `(arg) => expr` function in the page."""
+        if arg is None:
+            return self._page.evaluate(js)
+        return self._page.evaluate(js, arg)
+
+    def post_form(self, url: str, form: Dict[str, str]) -> Tuple[str, Optional[int]]:
+        """POST from inside the browser's own session; `(body, status)`.
 
         Playwright is the one engine of the three with a real request context
         attached to the browsing context, so this needs no page script at all.
+        The status goes back with the body: a refused reviews call must not
+        read as "the reviews ran out".
         """
         response = self._context.request.post(
             url, form=form, timeout=engine_core.DEFAULT_TIMEOUT_MS)
-        return response.text()
+        return response.text(), response.status
 
     def current_url(self) -> str:
         return self._page.url
@@ -111,15 +123,12 @@ def launch(args, proxy_url: Optional[str]) -> PlaywrightDriver:
     context_kwargs: Dict[str, Any] = {}
     init_script = None
     if args.fingerprint:
-        if not args.twocaptcha_key:
-            print("[warn] --fingerprint needs a 2Captcha key; continuing "
-                  "without one", file=sys.stderr)
-        else:
-            import fingerprint_client
-            fp = fingerprint_client.get_fingerprint(
-                args.twocaptcha_key, tags=args.fp_tags, country=args.fp_country)
-            context_kwargs.update(fingerprint_client.playwright_context_kwargs(fp))
-            init_script = fingerprint_client.playwright_init_script(fp)
+        # engine_core refuses --fingerprint without a key, so one is here.
+        import fingerprint_client
+        fp = fingerprint_client.get_fingerprint(
+            args.twocaptcha_key, tags=args.fp_tags, country=args.fp_country)
+        context_kwargs.update(fingerprint_client.playwright_context_kwargs(fp))
+        init_script = fingerprint_client.playwright_init_script(fp)
 
     launch_kwargs: Dict[str, Any] = {"headless": args.headless}
     if proxy_url:

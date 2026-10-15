@@ -134,7 +134,7 @@ def diff_products(old: List[dict], new: List[dict],
     # rotates ads in and out of a promoted slot that appears in the rows, so
     # a placement move would otherwise read as a price change. No placement
     # column exists here for such a bucket to key on, and porting one would
-    # be dead code that looks load-bearing (§4).
+    # be dead code that looks load-bearing.
     changed, source_changed, within_tolerance = [], [], []
     for sku in old_by_sku.keys() & new_by_sku.keys():
         before, after = old_by_sku[sku], new_by_sku[sku]
@@ -303,6 +303,26 @@ def _check_comparable(args) -> bool:
             f"of different --gl values, and their prices and ratings are not "
             f"comparable. Diff two runs of the same --gl. `source` cannot "
             f"catch it: it is 'play.google.com' on both sides.")
+
+    # A MARKET mismatch, read from the rows' own `gl`. The currency above
+    # cannot tell two markets that share one apart — DE and FR are both EUR —
+    # while the rating is per market, so a DE run diffed against an FR run
+    # would report every rating as changed.
+    markets = {}
+    for label, path in (("--old", args.old), ("--new", args.new)):
+        try:
+            rows = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        seen = {str(r.get("gl")).upper() for r in rows
+                if isinstance(r, dict) and r.get("gl")}
+        if len(seen) == 1:
+            markets[label] = seen.pop()
+    if len(set(markets.values())) > 1:
+        problems.append(
+            f"the two runs describe different markets ({markets}). Ratings and "
+            f"prices are per --gl, so every difference would be the market "
+            f"rather than the store moving. Diff two runs of the same --gl.")
 
     if not problems:
         return True
