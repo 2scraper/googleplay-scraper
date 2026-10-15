@@ -11,7 +11,69 @@ discovered from a bill or a diff.
 
 ## [Unreleased]
 
+> **Behaviour changes for existing callers.**
+> - A package id that does not exist, or a page Play served with no apps on
+>   it, now exits **4** (as the README always said), not 5. On Selenium the
+>   same 404 used to exit **3**; it is now 4 as well.
+> - A run that gathered rows and then failed (a timeout on page 2, a refused
+>   reviews call) now exits **6 and writes those rows**. It used to exit 5
+>   and throw them away — or, for a refused reviews call, exit 0 as
+>   "complete".
+> - Newly rejected with exit 2 naming the flag: `--pages 0` (it used to
+>   fetch nothing and exit 4), negative `--retries`, `--delay`,
+>   `--retry-delay`, `--proxy-block-retries`, `--reviews-per-call 0`,
+>   `--min-score` outside 0..1, `--concurrency` above 1 (it was accepted and
+>   ignored), `--proxy-rotate on-block` (it crashed), `--fingerprint` without
+>   a key or with `--cdp-endpoint`, and `--fingerprint` on the Selenium and
+>   pyppeteer engines (they warned and carried on). Selenium with
+>   `--cdp-endpoint` now exits 2 instead of 1.
+> - Output files are written atomically; a new file gets the mode your umask
+>   gives it, an existing file keeps its mode.
+> - In CSV output only, text cells starting with `=`, `+`, `-`, `@`, a tab
+>   or a line break are prefixed with `'`.
+
 ### Fixed
+
+- **`--proxy` and `--proxy-file` crashed before the first fetch**
+  (`AttributeError: 'ProxyPool' object has no attribute 'next'`). Both run
+  now, with `--proxy-rotate per-page` a fresh browser on the next exit for
+  every grid page, and a refused page moving to the next exit.
+- **`--retries`, `--retry-delay`, `--proxy-block-retries`, `--solve-captcha`,
+  `--captcha-api` and `--min-score` were accepted and read by nothing.**
+  `engine_core.fetch_page()` now applies them: `--retries` is extra attempts
+  on a transport failure or an unrecognised page (0 = one attempt), a
+  refused page gets fresh browsers without spending `--retries`, and a bare
+  HTTP 429 waits at the same exit.
+- **The captcha solver was never called**, although the README and
+  `.env.example` said it was wired. A reCAPTCHA on a refused page is now
+  detected, solved with a 2Captcha key, injected, and the page that follows
+  is judged — at most one paid solve per page, an allowance that neither a
+  retry nor a fresh exit resets. Tested offline against a stubbed solver; no
+  live solve has been run on this site.
+- **A refused or unreadable reviews call ended the run as complete.** The
+  status of the `batchexecute` call is now read on all three engines, and
+  such a page is recorded as failed (blocked when it says so).
+- **`GOOGLEPLAY_URL` from `.env` overrode `--category`** (and made
+  `--mode search --query …` a usage error). It is now used only when no
+  `--url` and no `--category`/`--query`/`--app-id`/`--developer` is typed,
+  and `.env.example` ships it commented out.
+- **An interrupted write truncated the previous output** (a good 1,105-byte
+  JSON left as 13 bytes of invalid JSON). Writes go to a temporary file
+  beside the target and are renamed into place.
+- **CSV cells written by app developers and reviewers could run as
+  spreadsheet formulas.** Escaped in CSV only; `csv_cells_escaped` in the
+  sidecar counts them.
+- **An empty document was classified as blocked.** It is now an
+  unrecognised page that is retried.
+- Error messages mask credentials in `http(s)://user:pass@` proxy URLs too.
+- `diff_runs.py` refuses two runs of different `--gl` markets even when they
+  share a currency (DE and FR).
+- `.env.example` no longer says Scraping Browser credentials "live about a
+  day"; how long they last varies.
+- Public files no longer refer to a private document; the rules are stated
+  in this repo's own words, and the suite fails if such a reference returns.
+- `tests.yml` no longer carries an inline copy of the sample check;
+  `ci_checks.py --sample-check` is the one implementation.
 
 - **Scraper API: `waitFor` is now sent as a JSON object.** Measured
   2026-09-23 against `scraper.2captcha.com/tasks/sync`: the JSON-encoded

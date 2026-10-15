@@ -23,12 +23,19 @@ What an engine must implement
 -----------------------------
     class Driver:
         name: str
-        def fetch(url, mode) -> (html, status)
-        def post_form(url, form) -> str
+        def fetch(url, mode) -> (html, status)   # navigate, wait, read
+        def read(mode) -> html                   # wait, read the page as it is now
+        def evaluate(js, arg=None) -> Any        # run an `(arg) => expr` function
+        def post_form(url, form) -> (text, status)
         def current_url() -> str
         def close() -> None
 
-and a `launch(args, proxy_url) -> Driver`.
+and a `launch(args, proxy_url) -> Driver`, which raises `UsageError` for a
+flag that engine cannot honour.
+
+The retries, the proxy rotation, the throttle wait and the paid captcha
+solve all live HERE, in `fetch_page()`, so there is one copy of each and one
+paid-solve allowance per page whichever engine runs it.
 
 Deliberately no JavaScript crosses this boundary — see `page_flow`. The
 driver is asked for named OPERATIONS, never handed a snippet, because
@@ -42,14 +49,53 @@ import sys
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+import captcha_solver
 import env_config
 import page_flow
 import product_parser as parser
 from output_writer import App, Review, finish_run, dedupe_by_key, EXIT_USAGE
-from proxy_pool import ProxyPool, mask, from_args as proxy_from_args
+from proxy_pool import ProxyError, ProxyPool, mask, from_args as proxy_from_args
 
 DEFAULT_TIMEOUT_MS = 45_000
 DEFAULT_OUT_PREFIX = "googleplay_apps"
+
+
+class UsageError(Exception):
+    """A flag combination an engine cannot honour. Exit 2, not a crash."""
+
+
+def _int_at_least(minimum: int):
+    def convert(text: str) -> int:
+        try:
+            value = int(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"{text!r} is not a whole number")
+        if value < minimum:
+            raise argparse.ArgumentTypeError(
+                f"must be at least {minimum}, got {value}")
+        return value
+    return convert
+
+
+def _float_between(low: float, high: Optional[float] = None):
+    def convert(text: str) -> float:
+        try:
+            value = float(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"{text!r} is not a number")
+        if value != value or value < low or (high is not None and value > high):
+            span = f"between {low} and {high}" if high is not None else f"at least {low}"
+            raise argparse.ArgumentTypeError(f"must be {span}, got {text}")
+        return value
+    return convert
+
+
+# Each count the run spends is validated by argparse, so a bad value is exit 2
+# naming the flag. `--pages 0` used to fetch nothing and report exit 4 — "the
+# catalogue is empty" — about a run that never asked.
+positive_int = _int_at_least(1)
+non_negative_int = _int_at_least(0)
+non_negative_float = _float_between(0.0)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -69,11 +115,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="the MARKET. Changes the rating, the currency and "
                          "which apps are listed. Default US.")
     ap.add_argument("--hl", default="en", help="the display language. Default en.")
-    ap.add_argument("--pages", type=int, default=1,
+    ap.add_argument("--pages", type=positive_int, default=1,
                     help="how many fetches to make. On a grid this follows "
                          "the page's own shelves; on reviews it follows the "
                          "continuation token.")
-    ap.add_argument("--reviews-per-call", type=int,
+    ap.add_argument("--reviews-per-call", type=positive_int,
                     default=parser.REVIEWS_PER_CALL,
                     help=f"reviews to ask for per call (default "
                          f"{parser.REVIEWS_PER_CALL}; no ceiling was found up "
@@ -88,22 +134,41 @@ def build_parser() -> argparse.ArgumentParser:
                          "review rows")
     ap.add_argument("--format", default="json", choices=("json", "csv", "both"))
     ap.add_argument("--out", default=DEFAULT_OUT_PREFIX)
-    ap.add_argument("--delay", type=float, default=1.5,
+    ap.add_argument("--delay", type=non_negative_float, default=1.5,
                     help="seconds between fetches")
-    ap.add_argument("--retries", type=int, default=2)
-    ap.add_argument("--retry-delay", type=float, default=3.0)
-    ap.add_argument("--concurrency", type=int, default=1)
+    ap.add_argument("--retries", type=non_negative_int, default=2,
+                    help="EXTRA attempts per page after the first, on a "
+                         "transport failure or a page nothing recognises "
+                         "(0 = one attempt). Default 2.")
+    ap.add_argument("--retry-delay", type=non_negative_float, default=3.0,
+                    help="seconds to wait before each retry")
+    ap.add_argument("--concurrency", type=positive_int, default=1,
+                    help="only 1 is implemented in this repo: pages are "
+                         "fetched one at a time, and a higher value is "
+                         "refused rather than silently ignored")
     ap.add_argument("--proxy", help="a single proxy URL")
     ap.add_argument("--proxy-file", help="a file of proxy URLs, one per line")
     ap.add_argument("--proxy-rotate", default="per-page",
-                    choices=("per-page", "per-run", "on-block"))
+                    choices=("per-page", "per-run"),
+                    help="with --proxy-file: a fresh browser on the next exit "
+                         "for every grid page (per-page), or one exit for the "
+                         "run (per-run). Either way a blocked page moves to "
+                         "the next exit. A reviews run keeps one session, "
+                         "because its continuation token belongs to it.")
     ap.add_argument("--proxy-shuffle", action="store_true")
-    ap.add_argument("--proxy-block-retries", type=int, default=None)
+    ap.add_argument("--proxy-block-retries", type=non_negative_int, default=None,
+                    help="fresh browsers to try on a blocked page (default "
+                         f"{page_flow.BLOCK_RETRIES_WITH_POOL} with a pool, "
+                         f"{page_flow.BLOCK_RETRIES_WITHOUT_POOL} without)")
     ap.add_argument("--twocaptcha-key")
     ap.add_argument("--captcha-api", default="v2", choices=("v2", "v1"))
     ap.add_argument("--solve-captcha", default="when-blocked",
-                    choices=("never", "when-blocked", "always"))
-    ap.add_argument("--min-score", type=float, default=0.3)
+                    choices=("never", "when-blocked", "always"),
+                    help="when-blocked: solve a reCAPTCHA only on a page the "
+                         "run classified as refused; always: on any page "
+                         "that carries one; never. At most one paid solve "
+                         "per page either way.")
+    ap.add_argument("--min-score", type=_float_between(0.0, 1.0), default=0.3)
     ap.add_argument("--cdp-endpoint")
     ap.add_argument("--fingerprint", action="store_true")
     ap.add_argument("--fp-country")
@@ -166,28 +231,244 @@ class RunOutcome:
         self.extra: Dict[str, Any] = {}
 
 
+def _sleep(seconds: float) -> None:
+    """Every wait in the loop goes through here, so a test can count them."""
+    if seconds > 0:
+        time.sleep(seconds)
+
+
+class Session:
+    """The browser, the exit it uses, and the paid-solve allowance.
+
+    A rotation is a fresh browser: cookies issued against one exit and
+    replayed from another are a stronger signal than either address alone,
+    so nothing is ever swapped under a live session. The solve allowance
+    lives HERE rather than on the driver, so a fresh browser does not reset
+    it.
+    """
+
+    def __init__(self, launch: Callable[[argparse.Namespace, Optional[str]], Any],
+                 args: argparse.Namespace, pool: Optional[ProxyPool]) -> None:
+        self._launch = launch
+        self.args = args
+        self.pool = pool
+        self.driver: Any = None
+        self.budget = page_flow.SolveBudget()
+        self.solves_bought = 0
+
+    def proxy_url(self) -> Optional[str]:
+        return self.pool.current if self.pool else None
+
+    def start(self) -> None:
+        self.driver = self._launch(self.args, self.proxy_url())
+
+    def relaunch(self, reason: str) -> None:
+        """A fresh browser — on the next exit when there is a pool."""
+        if self.pool:
+            self.pool.advance(reason)
+            print(f"[info] {reason}: fresh browser on exit "
+                  f"{mask(self.pool.current)}", file=sys.stderr)
+        else:
+            print(f"[info] {reason}: fresh browser on the same address",
+                  file=sys.stderr)
+        self.close()
+        self.start()
+
+    def close(self) -> None:
+        if self.driver is not None:
+            driver, self.driver = self.driver, None
+            try:
+                driver.close()
+            except Exception as exc:  # noqa: BLE001 — teardown must not mask the result
+                print(f"[warn] closing the browser: {type(exc).__name__}: "
+                      f"{_redact(str(exc))}", file=sys.stderr)
+
+
+_PROXY_FAILURE_MARKERS = ("ERR_PROXY", "ERR_TUNNEL", "ERR_NO_SUPPORTED_PROXIES",
+                          "ERR_SOCKS", "407")
+
+
+def _is_proxy_failure(exc: BaseException) -> bool:
+    """A dead exit wants a different exit, not another try at the same one."""
+    text = str(exc)
+    return any(m in text for m in _PROXY_FAILURE_MARKERS)
+
+
+def _wants_solve(args: argparse.Namespace, state: str) -> bool:
+    if args.solve_captcha == "never":
+        return False
+    if args.solve_captcha == "always":
+        return True
+    return page_flow.should_solve(state)
+
+
+def _solve(session: Session, html: str, url: str, mode: str,
+           page_num: int) -> Optional[str]:
+    """Solve a reCAPTCHA on the current page; the page afterwards, or None.
+
+    Every paid solve in this repo goes through here, and through
+    `session.budget` BEFORE the purchase. A token is bought only when it can
+    be used: no key, no way to run script in the page, or a spent allowance
+    each stop the purchase rather than follow it.
+    """
+    args = session.args
+    driver = session.driver
+    evaluate = getattr(driver, "evaluate", None)
+    static = captcha_solver.detect_recaptcha_v3(html or "", url)
+    live = (captcha_solver.detect_recaptcha_in_page(evaluate, url)
+            if evaluate is not None else None)
+    challenge = captcha_solver.reconcile_detections(static, live)
+    if challenge is None:
+        return None
+    if not args.twocaptcha_key:
+        print(f"[warn] page {page_num} carries a reCAPTCHA ({challenge.kind}) "
+              f"and no 2Captcha key is set — not solving", file=sys.stderr)
+        return None
+    if evaluate is None:
+        print(f"[warn] page {page_num}: this engine cannot run script in the "
+              f"page, so a token could not be used — not buying one",
+              file=sys.stderr)
+        return None
+    if not session.budget.spend(page_num):
+        print(f"[warn] page {page_num} already used its paid solve "
+              f"({page_flow.SOLVES_PER_PAGE} per page) — not buying another",
+              file=sys.stderr)
+        return None
+    session.solves_bought += 1
+    try:
+        token = captcha_solver.solve_recaptcha(
+            challenge, args.twocaptcha_key, api_version=args.captcha_api,
+            min_score=args.min_score)
+        evaluate(captcha_solver.INJECT_TOKEN_JS, token)
+        return driver.read(mode)
+    except Exception as exc:  # noqa: BLE001 — a solver error is a warning
+        print(f"[warn] captcha solve on page {page_num} failed: "
+              f"{type(exc).__name__}: {_redact(str(exc))}", file=sys.stderr)
+        return None
+
+
+def fetch_page(session: Session, url: str, mode: str, page_num: int,
+               dump_name: str) -> Tuple[str, Optional[int], str, str]:
+    """One page, with every budget the run has: `(html, status, state, reason)`.
+
+    * a transport failure or an `unknown` page spends `--retries` (EXTRA
+      attempts, so 0 means one), and a dead proxy moves to the next exit;
+    * a refused page gets `--proxy-block-retries` fresh browsers — on the
+      next exit when there is a pool — without spending `--retries`;
+    * a bare HTTP 429 waits at the SAME exit (`THROTTLE_BACKOFF_MS`), which
+      is the opposite response to a block, and spends neither;
+    * a reCAPTCHA is solved through `_solve()` — at most one paid solve per
+      page however many attempts the page takes.
+
+    A transport failure that outlives its retries is raised to the caller,
+    which records the page as failed and keeps the rows it already has.
+    """
+    args = session.args
+    attempts = args.retries + 1
+    block_budget = (args.proxy_block_retries
+                    if args.proxy_block_retries is not None
+                    else page_flow.block_retries(session.pool is not None))
+    attempt = blocks = throttles = 0
+    while True:
+        attempt += 1
+        try:
+            if session.driver is None:
+                session.start()
+            html, status = session.driver.fetch(url, mode)
+        except UsageError:
+            raise
+        except Exception as exc:
+            if attempt >= attempts:
+                raise
+            print(f"[warn] page {page_num} attempt {attempt}/{attempts}: "
+                  f"{type(exc).__name__}: {_redact(str(exc))}", file=sys.stderr)
+            if session.pool and _is_proxy_failure(exc):
+                session.relaunch("proxy_failure")
+            _sleep(args.retry_delay)
+            continue
+
+        _dump(args, dump_name, html)
+        state, reason = page_flow.classify(html, status, url, mode)
+
+        if state != "content" and _wants_solve(args, state):
+            solved = _solve(session, html, url, mode, page_num)
+            if solved is not None:
+                # The status was the interstitial's; the page now is
+                # whatever the solve led to, and is judged on what it holds.
+                html, status = solved, None
+                _dump(args, dump_name + "_solved", html)
+                state, reason = page_flow.classify(html, None, url, mode)
+
+        if (state == "blocked" and reason == "http_429"
+                and throttles < page_flow.THROTTLE_RETRIES):
+            delay = page_flow.throttle_delay_ms(throttles)
+            throttles += 1
+            attempt -= 1
+            print(f"[warn] page {page_num}: HTTP 429 — waiting {delay} ms at "
+                  f"the same exit ({throttles}/{page_flow.THROTTLE_RETRIES})",
+                  file=sys.stderr)
+            _sleep(delay / 1000.0)
+            continue
+
+        if page_flow.counts_as_blocked(state) and page_flow.should_retry(state) \
+                and blocks < block_budget:
+            blocks += 1
+            attempt -= 1
+            print(f"[warn] page {page_num} refused ({reason}); block retry "
+                  f"{blocks}/{block_budget}", file=sys.stderr)
+            session.relaunch("blocked")
+            continue
+
+        if (not page_flow.counts_as_blocked(state) and page_flow.should_retry(state)
+                and attempt < attempts):
+            print(f"[warn] page {page_num} unrecognised ({reason}); retry "
+                  f"{attempt}/{attempts - 1}", file=sys.stderr)
+            _sleep(args.retry_delay)
+            continue
+
+        return html, status, state, reason
+
+
 def _handle_state(out: RunOutcome, state: str, reason: str, page_num: int) -> bool:
-    """Record what a page turned out to be. Returns True if it is parseable."""
+    """Record what a page turned out to be. Returns True if it is parseable.
+
+    A 404 for the package id on page 1, and a served page with no apps on
+    it, are ANSWERS: they end the run as complete with nothing in it (exit 4)
+    rather than as a page that failed. A 404 on a later shelf is a page that
+    failed, since the run followed a link the store itself published.
+    """
     if page_flow.should_parse(state):
         return True
+    if state == "empty":
+        out.stop_reason = "empty_page"
+        return False
+    if state == "not_found" and page_num == 1:
+        out.stop_reason = "not_found"
+        return False
     out.pages_failed.append(page_num)
     if page_flow.counts_as_blocked(state):
         out.blocked = True
         out.stop_reason = f"blocked:{reason}"
     elif state == "not_found":
         out.stop_reason = "not_found"
-    elif state == "empty":
-        out.stop_reason = "empty_page"
     else:
         out.stop_reason = f"unrecognised:{reason}"
     return False
 
 
-def run_grid(driver, start_url: str, mode: str,
+def _fetch_failed(out: RunOutcome, exc: BaseException, page_num: int) -> None:
+    """A page whose transport failed after its retries. Rows so far are kept."""
+    print(f"[error] page {page_num}: {type(exc).__name__}: {_redact(str(exc))}",
+          file=sys.stderr)
+    out.pages_failed.append(page_num)
+    out.stop_reason = f"navigation_failed:{type(exc).__name__}"
+
+
+def run_grid(session: Session, start_url: str, mode: str,
              args: argparse.Namespace) -> RunOutcome:
     """listing / search / developer.
 
-    Page 1 is always fetched alone, because its shelves are what make pages
+    Page 1 is always fetched first, because its shelves are what make pages
     2..N addressable at all. The loop then follows those shelves, and stops
     on DATA — a fetch that added no new package id — never on a selector.
     """
@@ -203,17 +484,35 @@ def run_grid(driver, start_url: str, mode: str,
         visited.append(url)
         page_num = out.pages_completed + 1
 
-        html, status = driver.fetch(url, mode)
-        _dump(args, f"{mode}_p{page_num}", html)
-        state, reason = page_flow.classify(html, status, url, mode)
-        out.final_url = driver.current_url()
+        if (page_num > 1 and session.pool is not None
+                and session.pool.rotates_per_page()):
+            try:
+                session.relaunch("per-page rotation")
+            except UsageError:
+                raise
+            except Exception as exc:
+                _fetch_failed(out, exc, page_num)
+                break
+        try:
+            html, status, state, reason = fetch_page(
+                session, url, mode, page_num, f"{mode}_p{page_num}")
+        except UsageError:
+            raise
+        except Exception as exc:
+            _fetch_failed(out, exc, page_num)
+            break
+        out.final_url = session.driver.current_url() if session.driver else url
 
         if not _handle_state(out, state, reason, page_num):
-            if not page_flow.should_retry(state):
-                break
-            continue
+            break
 
         rows = parser.parse_grid(html, hl=args.hl, gl=args.gl, page=page_num)
+        if not rows:
+            # Classified as content because it HOLDS app records, and parsed
+            # to none: that is our parser, not an empty catalogue.
+            out.pages_failed.append(page_num)
+            out.stop_reason = "parser_found_nothing"
+            break
         fresh = dedupe_by_key(rows, seen_skus, key="sku")
         out.rows.extend(fresh)
         out.pages_completed += 1
@@ -230,7 +529,7 @@ def run_grid(driver, start_url: str, mode: str,
         if not queue:
             out.stop_reason = "end_of_listing"
         if out.pages_completed < args.pages and queue:
-            time.sleep(args.delay)
+            _sleep(args.delay)
 
     if out.pages_completed >= args.pages and not out.pages_failed:
         out.stop_reason = "completed"
@@ -238,13 +537,17 @@ def run_grid(driver, start_url: str, mode: str,
     return out
 
 
-def run_app(driver, url: str, args: argparse.Namespace) -> RunOutcome:
+def run_app(session: Session, url: str, args: argparse.Namespace) -> RunOutcome:
     """One store page -> one row, with the detail-only columns filled."""
     out = RunOutcome()
-    html, status = driver.fetch(url, "app")
-    _dump(args, "app", html)
-    out.final_url = driver.current_url()
-    state, reason = page_flow.classify(html, status, url, "app")
+    try:
+        html, status, state, reason = fetch_page(session, url, "app", 1, "app")
+    except UsageError:
+        raise
+    except Exception as exc:
+        _fetch_failed(out, exc, 1)
+        return out
+    out.final_url = session.driver.current_url() if session.driver else url
     if not _handle_state(out, state, reason, 1):
         return out
 
@@ -267,12 +570,13 @@ def run_app(driver, url: str, args: argparse.Namespace) -> RunOutcome:
     return out
 
 
-def run_reviews(driver, url: str, args: argparse.Namespace) -> RunOutcome:
+def run_reviews(session: Session, url: str, args: argparse.Namespace) -> RunOutcome:
     """One app's reviews.
 
     Strictly sequential, and that is a property of the site rather than a
     choice: page N+1's address is a continuation token inside page N's
-    response, so there is nothing for a second worker to fetch.
+    response, so there is nothing for a second worker to fetch — and the
+    session is kept for the whole run, since the token belongs to it.
 
     Page 1 comes out of the app page's own payload — no second request — and
     every page after it from `batchexecute`. Both are the same structure.
@@ -283,10 +587,15 @@ def run_reviews(driver, url: str, args: argparse.Namespace) -> RunOutcome:
         out.stop_reason = "no_app_id"
         return out
 
-    html, status = driver.fetch(url, "reviews")
-    _dump(args, "reviews_p1", html)
-    out.final_url = driver.current_url()
-    state, reason = page_flow.classify(html, status, url, "reviews")
+    try:
+        html, status, state, reason = fetch_page(session, url, "reviews", 1,
+                                                 "reviews_p1")
+    except UsageError:
+        raise
+    except Exception as exc:
+        _fetch_failed(out, exc, 1)
+        return out
+    out.final_url = session.driver.current_url() if session.driver else url
     if not _handle_state(out, state, reason, 1):
         return out
 
@@ -303,12 +612,28 @@ def run_reviews(driver, url: str, args: argparse.Namespace) -> RunOutcome:
         form = parser.build_reviews_request(
             package, count=args.reviews_per_call, token=token, sort=args.sort)
         try:
-            body = driver.post_form(endpoint, form)
+            body, post_status = session.driver.post_form(endpoint, form)
         except Exception as exc:  # a driver-specific transport failure
+            print(f"[error] reviews page {page_num}: {type(exc).__name__}: "
+                  f"{_redact(str(exc))}", file=sys.stderr)
             out.pages_failed.append(page_num)
             out.stop_reason = f"batchexecute_failed:{type(exc).__name__}"
             break
-        payload = parser.parse_batchexecute(body)
+        _dump(args, f"reviews_p{page_num}", body or "")
+        payload = parser.parse_batchexecute(body or "")
+        if payload is None or post_status not in (None, 200):
+            # The store did not answer with a reviews payload. That is a
+            # page that failed — a refusal if it says so — and never "the
+            # reviews ran out", which is what an unread body used to report.
+            out.pages_failed.append(page_num)
+            marker = parser.challenge_marker(body or "")
+            if marker or post_status in (403, 429):
+                out.blocked = True
+                out.stop_reason = (f"blocked:challenge_marker:{marker}" if marker
+                                   else f"blocked:http_{post_status}")
+            else:
+                out.stop_reason = f"batchexecute_unreadable:http_{post_status}"
+            break
         records, token = parser.reviews_from_payload(payload)
         fresh = _review_rows(records, package, args, page_num=page_num,
                              offset=len(out.rows), seen=seen)
@@ -320,7 +645,7 @@ def run_reviews(driver, url: str, args: argparse.Namespace) -> RunOutcome:
         if not token:
             out.stop_reason = "end_of_listing"
             break
-        time.sleep(args.delay)
+        _sleep(args.delay)
 
     if out.pages_completed >= args.pages and not out.pages_failed:
         out.stop_reason = "completed"
@@ -363,7 +688,19 @@ def _dump(args: argparse.Namespace, name: str, html: str) -> None:
 def main(launch: Callable[[argparse.Namespace, Optional[str]], Any],
          argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    # Captured BEFORE the environment fills anything: after `apply()` there is
+    # no telling a typed --url from GOOGLEPLAY_URL in `.env`, and a URL from
+    # the environment must not override --category/--query/--app-id/
+    # --developer, which the caller DID type. It used to: with the shipped
+    # `.env.example` copied, `--category GAME` returned TOOLS.
+    typed_url = args.url
     env_config.apply(args)
+    if not typed_url and args.url and any(
+            (args.category, args.query, args.app_id, args.developer)):
+        print("[info] ignoring GOOGLEPLAY_URL from the environment: a "
+              "--category/--query/--app-id/--developer was given",
+              file=sys.stderr)
+        args.url = None
 
     mode, url, error = resolve_target(args)
     if error:
@@ -371,27 +708,43 @@ def main(launch: Callable[[argparse.Namespace, Optional[str]], Any],
         return EXIT_USAGE
     args.mode = mode
 
-    cap = page_flow.concurrency_limit(mode, url)
-    if cap is not None and args.concurrency > cap:
-        print(f"[error] --concurrency {args.concurrency} is not available for "
-              f"--mode {mode}: this route's pages are not independently "
-              f"addressable, so page N+1's address does not exist until page "
-              f"N has come back", file=sys.stderr)
+    if args.concurrency > 1:
+        cap = page_flow.concurrency_limit(mode, url)
+        if cap is not None:
+            print(f"[error] --concurrency {args.concurrency} is not available "
+                  f"for --mode {mode}: this route's pages are not "
+                  f"independently addressable, so page N+1's address does not "
+                  f"exist until page N has come back", file=sys.stderr)
+        else:
+            print(f"[error] --concurrency {args.concurrency}: workers are not "
+                  f"implemented in this repo, and pages are fetched one at a "
+                  f"time. Refused rather than ignored, so a run never claims a "
+                  f"parallelism it did not have.", file=sys.stderr)
         return EXIT_USAGE
-    if args.concurrency > 1 and not (args.proxy or args.proxy_file):
-        print("[warn] --concurrency above 1 without a proxy pool sends N times "
-              "the traffic from one address, which is a faster way to be "
-              "scored than to gather data", file=sys.stderr)
     if args.cdp_endpoint and (args.proxy or args.proxy_file):
         print("[error] --cdp-endpoint already proxies; attaching --proxy to it "
               "manufactures a contradiction rather than better cover",
               file=sys.stderr)
         return EXIT_USAGE
+    if args.fingerprint and args.cdp_endpoint:
+        print("[error] --fingerprint cannot be applied over --cdp-endpoint: the "
+              "managed browser brings its own identity, and stacking a second "
+              "one manufactures a contradiction", file=sys.stderr)
+        return EXIT_USAGE
+    if args.fingerprint and not args.twocaptcha_key:
+        print("[error] --fingerprint needs a 2Captcha key (--twocaptcha-key or "
+              "TWOCAPTCHA_KEY); refused rather than run without one",
+              file=sys.stderr)
+        return EXIT_USAGE
 
-    pool = proxy_from_args(args)
-    proxy_url = pool.next() if pool else None
-    if proxy_url:
-        print(f"[info] exit {mask(proxy_url)}", file=sys.stderr)
+    try:
+        pool = proxy_from_args(args)
+    except (ProxyError, OSError) as exc:
+        print(f"[error] {_redact(str(exc))}", file=sys.stderr)
+        return EXIT_USAGE
+    if pool:
+        print(f"[info] exit {mask(pool.current)} (rotation: {pool.rotate})",
+              file=sys.stderr)
 
     unpaginated = page_flow.warn_unpaginated(mode, args.pages)
     if unpaginated:
@@ -400,28 +753,32 @@ def main(launch: Callable[[argparse.Namespace, Optional[str]], Any],
     print(f"[info] mode={mode} gl={args.gl} hl={args.hl} pages={args.pages}",
           file=sys.stderr)
 
-    out = RunOutcome()
-    driver = None
+    session = Session(launch, args, pool)
     try:
-        driver = launch(args, proxy_url)
-        try:
-            if mode in parser.GRID_MODES:
-                out = run_grid(driver, url, mode, args)
-            elif mode == "app":
-                out = run_app(driver, url, args)
-            else:
-                out = run_reviews(driver, url, args)
-        finally:
-            driver.close()
+        session.start()
+        if mode in parser.GRID_MODES:
+            out = run_grid(session, url, mode, args)
+        elif mode == "app":
+            out = run_app(session, url, args)
+        else:
+            out = run_reviews(session, url, args)
+    except UsageError as exc:
+        session.close()
+        print(f"[error] {exc}", file=sys.stderr)
+        return EXIT_USAGE
     except Exception as exc:
-        # The content was never obtained. That is exit 5, not "zero products":
-        # a consumer must be able to tell a dead proxy from an empty
-        # catalogue.
+        session.close()
+        # The browser never came up, so the content was never obtained. That
+        # is exit 5, not "zero products": a consumer must be able to tell a
+        # dead proxy from an empty catalogue. A failure AFTER rows were
+        # gathered never reaches here — the loops record the page as failed
+        # and keep the rows, which is a partial run (exit 6).
         print(f"[error] {type(exc).__name__}: {_redact(str(exc))}", file=sys.stderr)
         return finish_run(
             [], args.out, args.format, args.allow_empty, blocked=False,
             stop_reason="navigation_failed", pages_requested=args.pages,
             pages_completed=0, start_url=url, final_url=url, mode=mode)
+    session.close()
 
     if out.blocked:
         for tip in page_flow.block_advice(
@@ -432,13 +789,18 @@ def main(launch: Callable[[argparse.Namespace, Optional[str]], Any],
     print(f"[info] {len(out.rows)} rows over {out.pages_completed} page(s), "
           f"stop_reason={out.stop_reason}", file=sys.stderr)
 
+    extra = dict(out.extra, gl=args.gl, hl=args.hl)
+    if session.solves_bought:
+        extra["captcha_solves"] = session.solves_bought
+    if pool:
+        extra["proxy_rotations"] = pool.rotations
     return finish_run(
         out.rows, args.out, args.format, args.allow_empty,
         blocked=out.blocked, stop_reason=out.stop_reason,
         pages_requested=args.pages, pages_completed=out.pages_completed,
         start_url=url, final_url=out.final_url or url,
         pages_failed=out.pages_failed or None, mode=mode,
-        extra=dict(out.extra, gl=args.gl, hl=args.hl))
+        extra=extra)
 
 
 _SECRET_RE = None
@@ -459,6 +821,8 @@ def _redact(text: str) -> str:
         _SECRET_RE = re.compile(
             r"((?:client)?key|token|api[_-]?key)=[^&\s\"']+", re.I)
     text = _SECRET_RE.sub(r"\1=<redacted>", text)
-    text = re.sub(r"(ws{1,2}?://)[^:/@\s]+:[^@\s]+@", r"\1<redacted>@", text)
+    # Credentials in ANY URL — a CDP endpoint and a proxy alike.
+    text = re.sub(r"((?:wss?|https?|socks5h?)://)[^:/@\s]+:[^@\s]+@",
+                  r"\1<redacted>@", text)
     return text
 

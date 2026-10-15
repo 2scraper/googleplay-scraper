@@ -94,6 +94,8 @@ jobs:
                         f"{len(priced)}/{len(rows)}")
           ok &= require("every row has a package id",
                         all(r["sku"] and "." in r["sku"] for r in rows))
+          ok &= require("every row has a title and a developer",
+                        all(r["title"] and r["brand"] for r in rows))
           ok &= require("package ids are unique",
                         len({r["sku"] for r in rows}) == len(rows))
           ok &= require("every row records its market",
