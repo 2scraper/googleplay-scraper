@@ -11,6 +11,8 @@ discovered from a bill or a diff.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-10-15
+
 > **Behaviour changes for existing callers.**
 > - A package id that does not exist, or a page Play served with no apps on
 >   it, now exits **4** (as the README always said), not 5. On Selenium the
@@ -74,7 +76,6 @@ discovered from a bill or a diff.
   in this repo's own words, and the suite fails if such a reference returns.
 - `tests.yml` no longer carries an inline copy of the sample check;
   `ci_checks.py --sample-check` is the one implementation.
-
 - **Scraper API: `waitFor` is now sent as a JSON object.** Measured
   2026-09-23 against `scraper.2captcha.com/tasks/sync`: the JSON-encoded
   string this client sent (the form older docs described) is refused with
@@ -110,7 +111,6 @@ discovered from a bill or a diff.
   (`dubizzle_listings.*`). They now ignore this repo's own `googleplay_apps.*`.
   A `!fixtures_generated.json` exception for a file this repo does not have
   was removed, and the Dockerfile example no longer writes `/out/coffee`.
-
 - `SECURITY.md` said this project has no releases or version tags; it has
   both. "Supported versions" now names the latest release and `main`.
 - `captcha_solver.py`'s docstring pointed at a "No DataDome solver" section
@@ -202,5 +202,6 @@ None of these is a limitation of the store, and each is stated as what it is:
   part of a family-wide fix measured across 32 repos by CALLING each one's
   `finish_run` rather than grepping for it.
 
-[Unreleased]: https://github.com/2scraper/googleplay-scraper/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/2scraper/googleplay-scraper/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/2scraper/googleplay-scraper/releases/tag/v0.2.0
 [0.1.0]: https://github.com/2scraper/googleplay-scraper/releases/tag/v0.1.0

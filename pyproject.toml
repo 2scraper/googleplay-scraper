@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "googleplay-scraper"
-version = "0.1.0"
+version = "0.2.0"
 description = "Google Play scraper: app listings, search, full app pages, developer catalogues and reviews to JSON or CSV."
 readme = "README.md"
 license = "MIT"
