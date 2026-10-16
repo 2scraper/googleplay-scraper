@@ -84,9 +84,9 @@ been exercised offline against a stubbed solver only; no live solve has been
 run on this site.
 
 The canary is the standing test of that claim: it runs a real three-page
-scrape **daily from a bare GitHub runner with no secrets** and is expected to
+scrape **weekly (Mondays) from a bare GitHub runner with no secrets** and is expected to
 be green. If Play ever puts these routes behind a key or a challenge, the
-badge goes red the next morning and the sentence above gets retested without
+badge goes red on the next weekly run and the sentence above gets retested without
 anyone remembering to.
 
 ## The five modes
