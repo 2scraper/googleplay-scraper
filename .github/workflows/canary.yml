@@ -1,17 +1,17 @@
-# One real run against play.google.com, every morning.
+# One real run against play.google.com, every Monday.
 #
 # `tests.yml` deliberately never touches the site; this is the job that does.
 #
 # It carries NO SECRETS AND IS EXPECTED TO BE GREEN, and that is the whole
 # design. The README's central claim is "no key, no proxy, no account", and
-# the only honest way to keep a sentence like that true is to run it daily
+# the only honest way to keep a sentence like that true is to run it on a schedule
 # from an address nobody controls — a bare GitHub runner — and let the badge
-# go red the morning it stops being true.
+# go red on the first run after it stops being true.
 #
 # A canary that CANNOT pass must skip rather than fail (a check that is always
 # red teaches everyone to ignore checks). The other half of that rule applies
 # here: a canary that CAN pass without a credential must never be gated on
-# one, or it goes green every day while testing nothing.
+# one, or it goes green on every run while testing nothing.
 #
 # Measured 2026-09-22 from a datacentre address, and re-measured by this job
 # from GitHub's: every route below answers without a key.
@@ -20,7 +20,7 @@ name: canary
 
 on:
   schedule:
-    - cron: "17 6 * * *"
+    - cron: "17 6 * * 1"
   workflow_dispatch:
 
 permissions:
