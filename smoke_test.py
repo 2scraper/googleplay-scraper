@@ -1539,6 +1539,87 @@ def test_run_contract_reviews_pages_chain_on_the_token():
     return ok
 
 
+def test_recaptcha_variant_on_googles_demos():
+    """The variant decides which paid task is bought, so it is pinned per page.
+
+    `captures/recaptcha_discovery.json` holds what the live discovery script
+    returned on Google's own reCAPTCHA demos (2026-10-22, sitekeys replaced
+    by a same-shape fake). Both v2 demos load `api.js` with no `render`
+    parameter and used to come out as v3: the "no size, no render" case fell
+    through to the last branch, and a v3 task bought for a v2 widget is
+    refused by the solver (ERROR_CAPTCHA_UNSOLVABLE in the report that found
+    it). With the corrected kind, both demos were solved and accepted.
+    """
+    import captcha_solver
+    ok = True
+    path = os.path.join(HERE, "captures", "recaptcha_discovery.json")
+    if not os.path.exists(path):
+        skip("recaptcha-variant", "captures/recaptcha_discovery.json absent")
+        return True
+    with open(path, encoding="utf-8") as fh:
+        pages = json.load(fh)["pages"]
+    ok &= check("[recaptcha] the fixture covers v2, v2-invisible and v3",
+                {p["expected_kind"] for p in pages} ==
+                {"recaptcha_v2", "recaptcha_v2_invisible", "recaptcha_v3"})
+    for page in pages:
+        info = page["discovery"]
+        got = captcha_solver.detect_recaptcha_in_page(lambda js, i=info: i,
+                                                      page["url"])
+        ok &= check(f"[recaptcha] {page['name']} -> {page['expected_kind']}",
+                    got is not None and got.kind == page["expected_kind"],
+                    f"got {got.kind if got else None}")
+
+    # The badge alone must NOT make an invisible v2: v3 draws it too. With the
+    # loader's `render=<key>` present it is v3 whatever the badge says.
+    v3 = next(p["discovery"] for p in pages if p["expected_kind"] == "recaptcha_v3")
+    ok &= check("[recaptcha] v3 draws the badge too, and stays v3",
+                v3.get("badge") is True and captcha_solver.detect_recaptcha_in_page(
+                    lambda js: v3, "").kind == "recaptcha_v3")
+    # A page whose loader was not seen keeps the old conservative fallback
+    # rather than being read as implicit v2.
+    no_loader = dict(v3, loaderSeen=False, renderParam=None, size=None)
+    ok &= check("[recaptcha] no loader seen falls back instead of guessing v2",
+                captcha_solver.detect_recaptcha_in_page(
+                    lambda js: no_loader, "").kind == "recaptcha_v3")
+
+    # The static twin: `grecaptcha.render` is v2's explicit call, `execute` is v3.
+    key = "6L" + "x" * 38
+    explicit = (f'<div data-sitekey="{key}"></div>'
+                f'<script>grecaptcha.render("c", {{sitekey: "{key}"}})</script>')
+    executed = (f"<script>grecaptcha.execute('{key}', {{action: 'login'}})</script>")
+    got = captcha_solver.detect_recaptcha_v3(explicit, "https://x.test/")
+    ok &= check("[recaptcha] static: grecaptcha.render is v2",
+                got is not None and got.kind == "recaptcha_v2",
+                f"got {got.kind if got else None}")
+    got = captcha_solver.detect_recaptcha_v3(executed, "https://x.test/")
+    ok &= check("[recaptcha] static: grecaptcha.execute is v3",
+                got is not None and got.kind == "recaptcha_v3",
+                f"got {got.kind if got else None}")
+    return ok
+
+
+def test_captures_are_committable():
+    """Every file in captures/ must be one git would commit.
+
+    The checks above read these files and SKIP when one is missing, and a
+    skip reads as green. `.gitignore` carries `*.json` for run output, which
+    silently swallowed the first JSON fixture added here: it existed on the
+    machine that wrote the check and would not have existed in CI.
+    """
+    ok = True
+    if not os.path.isdir(os.path.join(HERE, ".git")):
+        skip("captures-committable", "not a git checkout (the image)")
+        return True
+    names = sorted(os.listdir(os.path.join(HERE, "captures")))
+    ok &= check("[captures] the directory is not empty", bool(names))
+    for name in names:
+        rel = os.path.join("captures", name)
+        r = subprocess.run(["git", "check-ignore", "-q", rel], cwd=HERE)
+        ok &= check(f"[captures] {rel} is not gitignored", r.returncode != 0,
+                    "a fixture git will not commit makes its check skip in CI")
+    return ok
+
+
 def test_run_contract_captcha_budget():
     """At most one paid solve per page, whatever retries and rotations do."""
     ok = True
@@ -1871,6 +1952,8 @@ def main():
         test_run_contract_exit_codes_per_state,
         test_run_contract_reviews_refusal_is_not_an_end,
         test_run_contract_reviews_pages_chain_on_the_token,
+        test_recaptcha_variant_on_googles_demos,
+        test_captures_are_committable,
         test_run_contract_captcha_budget,
         test_cli_rejects_counts_that_cannot_run,
         test_env_url_does_not_override_a_typed_builder_flag,

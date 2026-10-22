@@ -7,6 +7,10 @@
 *.json
 *.csv
 !package.json
+# A capture that is JSON is a committed fixture, not run output. Without
+# this line `*.json` swallows it, `git add` skips it, and the check that
+# reads it SKIPS in CI — which reads as green.
+!captures/*.json
 # Committed on purpose: a real 5-row excerpt of a real run, so a reader can see
 # the exact output shape without installing anything.
 !sample_output.json
