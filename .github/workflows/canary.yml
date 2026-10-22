@@ -147,7 +147,7 @@ jobs:
           # real people's names and profile ids into a public artefact.
           python3 playwright_scraper.py \
             --mode reviews --app-id com.whatsapp --pages 2 \
-            --reviews-per-call 100 --no-authors \
+            --reviews-per-call 100 --sort newest --no-authors \
             --format json --out canary_reviews
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
 
@@ -168,10 +168,21 @@ jobs:
           ok &= require("exit code is 0", rc == 0, f"got {rc}")
           ok &= require("status is complete", meta["status"] == "complete",
                         meta["status"])
-          # Page 1 is embedded in the app page and page 2 comes from
-          # batchexecute, so clearing 100 rows proves BOTH routes worked.
-          ok &= require("both review routes produced rows", len(rows) >= 100,
-                        str(len(rows)))
+          # Both pages come from batchexecute, page 2 with page 1's token, so
+          # each carries close to the 100 asked for. The old floor was
+          # `>= 100` over the whole run and passed by accident: 20 embedded
+          # reviews plus the 80 a TOKENLESS page 2 had left after dedupe.
+          # A per-page floor is what fails when page 2 restarts the list.
+          per_page = [sum(1 for r in rows if r["page"] == n) for n in (1, 2)]
+          ok &= require("each page carries a full page of reviews",
+                        all(n >= 95 for n in per_page), str(per_page))
+          # --sort newest must come back newest first ACROSS the page
+          # boundary. Counting rows could not see that it did not.
+          dates = [r["posted_at"] for r in rows]
+          ok &= require("newest first, end to end",
+                        all(dates[i] >= dates[i + 1]
+                            for i in range(len(dates) - 1)),
+                        str(dates[:4]))
           ok &= require("review ids are unique",
                         len({r["review_id"] for r in rows}) == len(rows))
           ok &= require("scores are real stars",

@@ -126,9 +126,9 @@ def build_parser() -> argparse.ArgumentParser:
                          f"to 2000)")
     ap.add_argument("--sort", default=parser.DEFAULT_REVIEW_SORT,
                     choices=sorted(parser.REVIEW_SORTS),
-                    help="review ordering. Only 'newest' is implemented: the "
-                         "store's other two keys return an empty payload in "
-                         "this request shape.")
+                    help="review ordering: newest (posted_at descending, "
+                         "kept across pages), relevant (the store's own "
+                         "ranking) or rating. Default newest.")
     ap.add_argument("--no-authors", action="store_true",
                     help="drop reviewer name, profile id and avatar from "
                          "review rows")
@@ -192,6 +192,12 @@ def resolve_target(args: argparse.Namespace) -> Tuple[Optional[str], Optional[st
         if reason:
             return None, None, reason
         mode = parser.mode_for_url(args.url)
+        # An app page is the address of BOTH app-level modes: `--mode app`
+        # reads the page, `--mode reviews` pages that app's reviews. Refusing
+        # the second contradicted `--help`, which says the route decides the
+        # mode unless --mode says otherwise.
+        if mode == "app" and args.mode == "reviews":
+            return "reviews", parser.with_market(args.url, args.hl, args.gl), None
         if args.mode and args.mode != "listing" and mode != args.mode:
             # An explicit --mode that disagrees with the URL is a mistake
             # worth naming rather than silently resolving one way.
@@ -578,8 +584,16 @@ def run_reviews(session: Session, url: str, args: argparse.Namespace) -> RunOutc
     response, so there is nothing for a second worker to fetch — and the
     session is kept for the whole run, since the token belongs to it.
 
-    Page 1 comes out of the app page's own payload — no second request — and
-    every page after it from `batchexecute`. Both are the same structure.
+    The app page is fetched first, but only to establish that the app exists
+    in this market (Play answers a missing id with a clean 404) and to put the
+    session on Play's own origin for the POSTs that follow. EVERY page of rows
+    comes from `batchexecute`, page 1 included.
+
+    Up to 0.2.0 page 1 was taken from the reviews the app page embeds. Those
+    are in relevance order whatever `--sort` says and carry no continuation
+    token, so page 2 was requested without one, came back as the start of the
+    list again, and was mostly eaten by dedupe — 20 / 1 / 19 rows over three
+    pages in one reported run, and "end_of_listing" after one page in another.
     """
     out = RunOutcome()
     package = parser.package_from_url(url)
@@ -589,7 +603,7 @@ def run_reviews(session: Session, url: str, args: argparse.Namespace) -> RunOutc
 
     try:
         html, status, state, reason = fetch_page(session, url, "reviews", 1,
-                                                 "reviews_p1")
+                                                 "reviews_app")
     except UsageError:
         raise
     except Exception as exc:
@@ -600,11 +614,6 @@ def run_reviews(session: Session, url: str, args: argparse.Namespace) -> RunOutc
         return out
 
     seen: set = set()
-    records = parser.embedded_reviews(html)
-    out.rows.extend(_review_rows(records, package, args, page_num=1,
-                                 offset=0, seen=seen))
-    out.pages_completed = 1
-
     token: Optional[str] = None
     endpoint = parser.batchexecute_url(args.hl, args.gl)
     while out.pages_completed < args.pages:
@@ -743,7 +752,12 @@ def main(launch: Callable[[argparse.Namespace, Optional[str]], Any],
         print(f"[error] {_redact(str(exc))}", file=sys.stderr)
         return EXIT_USAGE
     if pool:
-        print(f"[info] exit {mask(pool.current)} (rotation: {pool.rotate})",
+        # A reviews run keeps one session for its whole length — the
+        # continuation token belongs to it — so a per-page policy does not
+        # apply there and the log must not claim it does.
+        rotation = ("one exit for the run: the review token belongs to the "
+                    "session" if mode == "reviews" else pool.rotate)
+        print(f"[info] exit {mask(pool.current)} (rotation: {rotation})",
               file=sys.stderr)
 
     unpaginated = page_flow.warn_unpaginated(mode, args.pages)

@@ -5,6 +5,10 @@ address (netcup, Nuremberg) with plain `curl` and no cookies. Every number in
 the README and in `product_parser.py`'s comments can be re-measured from
 these.
 
+The two `reviews_*.txt` files were re-taken on 2026-10-22, after the request
+`make_fixtures.py` sends was corrected to put the sort key where the store
+reads it; the earlier pair was in relevance order.
+
 | file | route | what it is for |
 |---|---|---|
 | `cat_game_us.html` | `/store/apps/category/GAME` | the grid, and seven named shelves |
@@ -19,8 +23,8 @@ these.
 | `apps_home_us.html` | `/store/apps` | the store front, with the chart shelves |
 | `cluster_us.html` | `/store/apps/collection/cluster?gsr=…` | an expanded shelf — what `--pages` follows |
 | `notfound.html` | a package id that does not exist | HTTP 404, and the control for the asset-count signal |
-| `reviews_p1.txt` | `batchexecute` RPC `UsvDTd` | 40 reviews and a continuation token |
-| `reviews_p2.txt` | the same, with that token | 40 more, sharing none of page 1's ids |
+| `reviews_p1.txt` | `batchexecute` RPC `UsvDTd`, `--sort newest` | 40 reviews, newest first, and a continuation token |
+| `reviews_p2.txt` | the same, with that token | 40 more, sharing none of page 1's ids and continuing the date order |
 
 ## What is NOT verbatim
 

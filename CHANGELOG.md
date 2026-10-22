@@ -11,6 +11,40 @@ discovered from a bill or a diff.
 
 ## [Unreleased]
 
+> **Correction to 0.1.0 and 0.2.0: `--sort newest` did not sort, and the
+> README's account of the store's orderings was wrong.** Both releases sent
+> the sort key in the wrong slot of the request. The store then answered
+> "newest" in its relevance order — dates like 08-28, 08-31, 09-18, 07-26 —
+> and answered "relevant" and "rating" with nothing at all, which the README
+> reported as "the store's other two keys return an empty payload". That was
+> a measurement of this repository's own request, not of the store: in the
+> request shape the store's front end uses, all three orderings work.
+> Reviews runs will now come back in a different order, and `--sort` takes
+> two more values.
+
+### Fixed
+
+- **`--sort` reaches the store.** The key now goes in the second slot of the
+  sort block (`[2, <sort>, [count, null, token], null, []]`). `newest` is
+  newest first and stays so across pages; `relevant` and `rating` are
+  offered. An unknown value is refused rather than silently replaced.
+- **Page 2 of a reviews run no longer restarts the list.** Page 1 used to be
+  the handful of reviews embedded in the app page, which carry no
+  continuation token, so page 2 went out without one, came back as the start
+  of the list, and was mostly removed as duplicates — 20 / 1 / 19 rows over
+  three pages in one reported run, and `end_of_listing` after a single page
+  in another. Every page now comes from the reviews endpoint, each asked for
+  with the previous page's token. That costs one request more than before.
+- `--url <app page> --mode reviews` runs a reviews run. It used to be refused
+  as a mode conflict, contradicting `--help`.
+- With a proxy pool, a reviews run logs that it keeps one exit for the run
+  (the continuation token belongs to the session) instead of claiming the
+  per-page rotation it never applies.
+- The canary's reviews job asserts a full page of rows on EACH page and
+  newest-first order across the run. Its previous floor of 100 rows over two
+  pages passed by accident: 20 embedded reviews plus the 80 a tokenless page
+  2 left after dedupe.
+
 ### Changed
 
 - CI only: the canary now runs weekly (Mondays 06:17 UTC) instead of daily, and on a manual dispatch.
