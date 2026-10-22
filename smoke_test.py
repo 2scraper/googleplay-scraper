@@ -1771,6 +1771,219 @@ def test_run_contract_output_paths():
     return ok
 
 
+def test_cdp_connect_policy():
+    """Which CDP handshake refusals are worth waiting out, as data."""
+    ok = True
+
+    class WithStatus(Exception):
+        status_code = 500
+
+    class Response:
+        status_code = 503
+
+    class WithResponse(Exception):
+        response = Response()
+
+    cases = (
+        ("Playwright's 500 message",
+         Exception("BrowserType.connect_over_cdp: WebSocket error: "
+                   "ws://h:9222/ 500 Internal Server Error"), True),
+        ("websockets status_code 500", WithStatus("rejected"), True),
+        ("websockets response.status_code 503", WithResponse("rejected"), True),
+        ("401 Unauthorized", Exception("WebSocket error: ws://h:9222/ 401 "
+                                       "Unauthorized"), False),
+        ("a refused port", ConnectionRefusedError(111, "Connect call failed"), False),
+        ("a timeout", TimeoutError(), False),
+        ("a 500 in unrelated text", Exception("page 500 of results"), False),
+    )
+    for label, exc, want in cases:
+        ok &= check(f"[cdp] retriable({label}) is {want}",
+                    page_flow.cdp_connect_retriable(exc) is want)
+    ok &= check("[cdp] bounded attempts", page_flow.CDP_CONNECT_ATTEMPTS == 3)
+    return ok
+
+
+class _Recorder:
+    """A fake browser object: every method call is recorded, sync or async."""
+
+    def __init__(self, log, name, is_async=False):
+        self._log, self._name, self._async = log, name, is_async
+
+    def __getattr__(self, attr):
+        def call(*a, **k):
+            self._log.append(f"{self._name}.{attr}")
+            if self._async:
+                async def done():
+                    return None
+                return done()
+            return None
+        return call
+
+
+def test_cdp_teardown_playwright():
+    """Over --cdp-endpoint, close only what this run opened."""
+    ok = True
+    try:
+        import playwright_scraper as engine
+    except ImportError as exc:
+        skip("cdp-playwright", f"playwright not installed ({exc})")
+        return True
+
+    class Ctx:
+        def __exit__(self, *a):
+            log.append("playwright.stop")
+
+    for connected, owns_context, want in (
+            (True, False, ["page.close", "browser.close", "playwright.stop"]),
+            (True, True, ["page.close", "context.close", "browser.close",
+                          "playwright.stop"]),
+            (False, True, ["browser.close", "playwright.stop"])):
+        log = []
+        driver = engine.PlaywrightDriver(
+            Ctx(), _Recorder(log, "browser"), _Recorder(log, "context"),
+            _Recorder(log, "page"), connected=connected,
+            owns_context=owns_context)
+        driver.close()
+        ok &= check(f"[cdp] playwright close (connected={connected}, "
+                    f"owns_context={owns_context})", log == want, str(log))
+
+    # The handshake retry: two 500s, then a browser.
+    calls = []
+
+    class Chromium:
+        def connect_over_cdp(self, endpoint, timeout):
+            calls.append(endpoint)
+            if len(calls) < 3:
+                raise engine.PlaywrightError(
+                    "BrowserType.connect_over_cdp: WebSocket error: "
+                    "ws://h:9222/ 500 Internal Server Error")
+            return "BROWSER"
+
+    class PW:
+        chromium = Chromium()
+
+    saved = page_flow.CDP_CONNECT_BACKOFF_S
+    page_flow.CDP_CONNECT_BACKOFF_S = (0.0, 0.0)
+    try:
+        try:
+            with redirect_stderr(io.StringIO()):
+                got = engine._connect_over_cdp(PW(), "ws://h:9222/")
+        except Exception as exc:   # report it by name, not as a traceback
+            got = f"raised {type(exc).__name__}"
+        ok &= check("[cdp] playwright retries a 500 handshake, then connects",
+                    got == "BROWSER" and len(calls) == 3, f"{got} {len(calls)}")
+        calls.clear()
+
+        class Chromium401(Chromium):
+            def connect_over_cdp(self, endpoint, timeout):
+                calls.append(endpoint)
+                raise engine.PlaywrightError("WebSocket error: ws://h/ 401 Unauthorized")
+
+        PW.chromium = Chromium401()
+        try:
+            engine._connect_over_cdp(PW(), "ws://h:9222/")
+            ok &= check("[cdp] playwright raises a 401", False, "no error")
+        except engine.PlaywrightError:
+            ok &= check("[cdp] playwright does not retry a 401", len(calls) == 1,
+                        str(len(calls)))
+    finally:
+        page_flow.CDP_CONNECT_BACKOFF_S = saved
+    return ok
+
+
+def test_cdp_teardown_pyppeteer():
+    """Disconnect from a browser this run did not launch; never hang connecting."""
+    ok = True
+    try:
+        import puppeteer_scraper as engine
+    except ImportError as exc:
+        skip("cdp-pyppeteer", f"pyppeteer not installed ({exc})")
+        return True
+    import asyncio
+    import http.server
+    import socket
+    import threading
+    import time
+
+    for connected, want in ((True, ["page.close", "browser.disconnect"]),
+                            (False, ["browser.close"])):
+        log = []
+        loop = asyncio.new_event_loop()
+        driver = engine.PuppeteerDriver(loop, _Recorder(log, "browser", True),
+                                        _Recorder(log, "page", True),
+                                        connected=connected)
+        driver.close()
+        ok &= check(f"[cdp] pyppeteer close (connected={connected})",
+                    log == want, str(log))
+        ok &= check(f"[cdp] pyppeteer closes its loop (connected={connected})",
+                    loop.is_closed())
+
+    # A real handshake refusal must RAISE, with its status, not hang.
+    class Refuse(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            self.send_response(500)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Refuse)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    free = socket.socket()
+    free.bind(("127.0.0.1", 0))
+    closed_port = free.getsockname()[1]
+    free.close()
+    try:
+        for label, endpoint, status in (
+                ("an HTTP 500 handshake",
+                 f"ws://127.0.0.1:{server.server_port}/devtools/browser/x", 500),
+                ("a closed port", f"ws://127.0.0.1:{closed_port}/x", None)):
+            loop = asyncio.new_event_loop()
+            started = time.time()
+            try:
+                with redirect_stderr(io.StringIO()):
+                    loop.run_until_complete(engine._connect(endpoint, 15))
+                ok &= check(f"[cdp] pyppeteer raises on {label}", False, "connected?")
+            except engine.CDPConnectError as exc:
+                ok &= check(f"[cdp] pyppeteer raises on {label}, promptly",
+                            time.time() - started < 10,
+                            f"{time.time() - started:.1f}s")
+                ok &= check(f"[cdp] and carries the status ({label})",
+                            exc.status_code == status, str(exc.status_code))
+            finally:
+                engine._drain_and_close(loop)
+    finally:
+        server.shutdown()
+
+    # The retry wraps it: two 500s, then a browser; a 401 once.
+    attempts = []
+
+    async def flaky(endpoint, timeout_s):
+        attempts.append(endpoint)
+        if len(attempts) < 3:
+            raise engine.CDPConnectError("refused", 500)
+        return "BROWSER"
+
+    saved = (engine._connect, page_flow.CDP_CONNECT_BACKOFF_S)
+    engine._connect, page_flow.CDP_CONNECT_BACKOFF_S = flaky, (0.0, 0.0)
+    loop = asyncio.new_event_loop()
+    try:
+        try:
+            with redirect_stderr(io.StringIO()):
+                got = engine._connect_with_retry(loop, "ws://h/")
+        except Exception as exc:   # report it by name, not as a traceback
+            got = f"raised {type(exc).__name__}"
+        ok &= check("[cdp] pyppeteer retries a 500 handshake, then connects",
+                    got == "BROWSER" and len(attempts) == 3, f"{got} {len(attempts)}")
+    finally:
+        engine._connect, page_flow.CDP_CONNECT_BACKOFF_S = saved
+        engine._drain_and_close(loop)
+    return ok
+
+
 def test_run_contract_captcha_budget():
     """At most one paid solve per page, whatever retries and rotations do."""
     ok = True
@@ -2109,6 +2322,9 @@ def main():
         test_run_contract_last_page_reason_survives,
         test_run_contract_bad_gl_is_usage,
         test_run_contract_output_paths,
+        test_cdp_connect_policy,
+        test_cdp_teardown_playwright,
+        test_cdp_teardown_pyppeteer,
         test_run_contract_captcha_budget,
         test_cli_rejects_counts_that_cannot_run,
         test_env_url_does_not_override_a_typed_builder_flag,

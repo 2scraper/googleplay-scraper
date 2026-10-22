@@ -17,6 +17,7 @@ Playwright and pyppeteer take `() => expr`, so the engines pass their own
 primitives in and this module names the OPERATION.
 """
 
+import re
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 import urllib.parse
 
@@ -347,3 +348,50 @@ def block_advice(html: Optional[str], headless: bool,
             "here — but if a reCAPTCHA does appear on a refused page, the "
             "run will solve it with a key (at most one paid solve per page)")
     return tips
+
+
+# --------------------------------------------------------------------------
+# Connecting to a browser over CDP
+# --------------------------------------------------------------------------
+
+# A managed browser can refuse the WebSocket handshake for a few seconds
+# after a previous session on the same profile ended: the 2Captcha Scraping
+# Browser API answers HTTP 500 while it tears the old session down (reported
+# by a manual test of 0.2.0, back-to-back runs). That refusal costs nothing —
+# no session was created — and clears on its own, so it is worth a short wait
+# and another try. A refused port or a timeout is not: the first says nothing
+# is there, the second has already waited the full timeout.
+CDP_CONNECT_ATTEMPTS = 3
+CDP_CONNECT_BACKOFF_S = (3.0, 6.0)
+_CDP_RETRIABLE_STATUSES = (500, 502, 503)
+
+_STATUS_IN_TEXT = re.compile(r"\b(50[023])\b")
+
+
+def cdp_connect_status(exc: BaseException) -> Optional[int]:
+    """The HTTP status a failed CDP handshake carried, if it says.
+
+    `websockets` reports it as `status_code` (10.x) or `response.status_code`
+    (newer); Playwright only in its message — "WebSocket error: <url> 500
+    Internal Server Error", measured against a local server answering 500.
+    """
+    for value in (getattr(exc, "status_code", None),
+                  getattr(getattr(exc, "response", None), "status_code", None)):
+        if isinstance(value, int):
+            return value
+    text = str(exc)
+    if "WebSocket" in text or "HTTP" in text or "handshake" in text.lower():
+        m = _STATUS_IN_TEXT.search(text)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def cdp_connect_retriable(exc: BaseException) -> bool:
+    return cdp_connect_status(exc) in _CDP_RETRIABLE_STATUSES
+
+
+def cdp_connect_delay(attempt: int) -> float:
+    """Seconds to wait before attempt `attempt + 1` (attempt counts from 1)."""
+    idx = max(0, min(attempt - 1, len(CDP_CONNECT_BACKOFF_S) - 1))
+    return CDP_CONNECT_BACKOFF_S[idx]
