@@ -22,6 +22,7 @@ reads it; the earlier pair was in relevance order.
 | `dev_us.html` | `/store/apps/dev?id=…` | a developer grid |
 | `apps_home_us.html` | `/store/apps` | the store front, with the chart shelves |
 | `cluster_us.html` | `/store/apps/collection/cluster?gsr=…` | an expanded shelf — what `--pages` follows |
+| `bad_request_gl.html` | `/store/apps/category/GAME?gl=USA` | Play's own HTTP 400 for a country it does not serve, verbatim (1.7 KB) — a usage error, and a second control for the asset-count signal |
 | `notfound.html` | a package id that does not exist | HTTP 404, and the control for the asset-count signal |
 | `reviews_p1.txt` | `batchexecute` RPC `UsvDTd`, `--sort newest` | 40 reviews, newest first, and a continuation token |
 | `reviews_p2.txt` | the same, with that token | 40 more, sharing none of page 1's ids and continuing the date order |

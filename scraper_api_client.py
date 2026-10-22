@@ -248,6 +248,13 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
     # `(state, reason)`; comparing the tuple itself to "blocked" never
     # matched, so a refusal fell through to "0 products".
     state, reason = detect_page_state(html, status=upstream_status, url=args.url)
+    if state == "bad_request":
+        # Play's own HTTP 400 — a `gl=` in the URL that the store does not
+        # serve. The caller's to fix, so usage (2), not blocked or empty.
+        logger.error("Play refused the request as malformed (upstream HTTP %s): "
+                     "usually a gl= country code the store does not serve. "
+                     "Use one it does, e.g. gl=US.", upstream_status)
+        return 2
     if state == "blocked":
         dump = f"{args.out}_scraperapi_debug.html"
         with open(dump, "w", encoding="utf-8") as f:

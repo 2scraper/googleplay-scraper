@@ -133,6 +133,10 @@ STATE_POLICY: Dict[str, Dict[str, bool]] = {
     # is not worth a retry, not worth a solve, and emphatically not a block —
     # calling it one would send a reader to buy a proxy for a typo.
     "not_found": {"parse": False, "retry": False, "solve": False, "blocked": False},
+    # Play's own HTTP 400: the request was malformed (a `gl` it does not
+    # serve). Nothing a retry, a solve or another exit can change — the run
+    # stops with a usage error naming the flag.
+    "bad_request": {"parse": False, "retry": False, "solve": False, "blocked": False},
     "blocked":   {"parse": False, "retry": True,  "solve": True,  "blocked": True},
     # Served, and holds nothing we recognise. A real answer for a category
     # with no apps or a search with no hits, so it is not retried: retrying an

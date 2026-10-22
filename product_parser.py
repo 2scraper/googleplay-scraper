@@ -189,6 +189,13 @@ MIN_ASSET_REFERENCES = 2
 # images at all" and only where no HTTP status is available.
 NOT_FOUND_MARKER = "the requested URL was not found on this server"
 
+# The heading of Play's own HTTP 400 page — what it answers when `gl` names a
+# country it does not serve (`USA`, `xx`, `12`; measured 2026-10-22). 1.7 KB,
+# no store images, and the phrase appears in none of the served captures. It
+# is a malformed REQUEST, not a refusal: reading it as blocked sent runs into
+# fresh-browser retries and advice to buy a proxy, for a typo in a flag.
+BAD_REQUEST_MARKER = "Error 400 (Bad Request)"
+
 
 def asset_reference_count(markup: str) -> int:
     """How many times the page references Play's own image host."""
@@ -746,6 +753,30 @@ def _shelf_title(ancestors: List[list], records: List[list]) -> Optional[str]:
     return None
 
 
+def _is_image(node: Any) -> bool:
+    """`[null, 2, [w, h], [null, null, "<url>"], ...]` — one Play image."""
+    return (isinstance(node, list) and len(node) >= 4
+            and isinstance(node[2], list) and isinstance(node[3], list)
+            and any(isinstance(v, str) and v.startswith("http") for v in node[3]))
+
+
+def _screenshot_count(node: Any) -> Optional[int]:
+    """How many screenshots a screenshot slot holds.
+
+    The two routes wrap the list differently: a grid tile puts the images
+    directly in the slot, the app page puts them one level down —
+    `[[image, image, ...]]`. Counting the slot itself therefore reported 1 on
+    every app row (WhatsApp has 9, Minecraft 8 in the captures). Unwrap
+    single-element wrappers until the level that actually holds images.
+    """
+    while (isinstance(node, list) and len(node) == 1
+           and isinstance(node[0], list) and not _is_image(node[0])):
+        node = node[0]
+    if not isinstance(node, list):
+        return None
+    return sum(1 for item in node if _is_image(item))
+
+
 def parse_tile(record: Sequence[Any], hl: str = "en", gl: str = "US",
                page: Optional[int] = None, position: Optional[int] = None,
                shelf: Optional[str] = None,
@@ -797,7 +828,7 @@ def parse_tile(record: Sequence[Any], hl: str = "en", gl: str = "US",
         description=_strip_html(description[1] if isinstance(description, list)
                                 and len(description) > 1
                                 and isinstance(description[1], str) else _text(description)),
-        screenshot_count=len(screenshots) if isinstance(screenshots, list) else None,
+        screenshot_count=_screenshot_count(screenshots),
         shelf=shelf,
         shelf_rank=shelf_rank,
     )
@@ -966,7 +997,7 @@ def parse_detail(markup: str, package_id: Optional[str] = None,
         developer_email=email,
         developer_website=website,
         privacy_policy_url=_first_url(_slot(body, DETAIL["privacy"]), "http"),
-        screenshot_count=len(screenshots) if isinstance(screenshots, list) else None,
+        screenshot_count=_screenshot_count(screenshots),
         chart_name=chart_name,
         chart_rank=chart_rank,
     )
@@ -1372,7 +1403,8 @@ def _developer_reply(node: Any) -> Tuple[Optional[str], Optional[str]]:
 # What did we actually get?
 # --------------------------------------------------------------------------
 
-PAGE_STATES = ("content", "not_found", "blocked", "empty", "unknown")
+PAGE_STATES = ("content", "not_found", "bad_request", "blocked", "empty",
+               "unknown")
 
 
 def detect_page_state(markup: str, status: Optional[int] = None,
@@ -1420,6 +1452,15 @@ def detect_page_state(markup: str, status: Optional[int] = None,
     if (status is None and NOT_FOUND_MARKER in markup
             and asset_reference_count(markup) == 0):
         return "not_found", "not_found_template"
+
+    # A malformed request, which is the caller's to fix and never worth a
+    # retry. With a status it needs nothing else; without one (Selenium) the
+    # page's own heading AND the absence of every store image, as for 404.
+    if status == 400:
+        return "bad_request", "http_400"
+    if (status is None and BAD_REQUEST_MARKER in markup
+            and asset_reference_count(markup) == 0):
+        return "bad_request", "bad_request_template"
 
     marker = challenge_marker(markup)
     if marker:
