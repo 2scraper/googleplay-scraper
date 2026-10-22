@@ -11,6 +11,22 @@ discovered from a bill or a diff.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-10-22
+
+> **Behaviour changes for existing callers.**
+> - `--mode reviews` comes back in a different order. `--sort newest` now
+>   sorts newest first — it returned the store's relevance order before —
+>   and every page, page 1 included, comes from the reviews endpoint with
+>   the previous page's token: one request more than before, and no page
+>   that restarts the list. `--sort` also takes `relevant` and `rating`.
+> - A `--gl` Play does not serve is **exit 2**, not 3, with no retries.
+> - `--url` keeps its own `gl`/`hl`; the defaults no longer replace them.
+> - `--out x.json` writes `x.json`, not `x.json.json`.
+> - `stop_reason` says `no_new_products` where the last page added nothing;
+>   it said `completed`. Status and exit code are unchanged.
+> - `scraper_api_client.py` defaults to `--format json` (was `both`) and
+>   writes a `.meta.json` like the browser engines.
+
 > **Correction to 0.1.0 and 0.2.0: `--sort newest` did not sort, and the
 > README's account of the store's orderings was wrong.** Both releases sent
 > the sort key in the wrong slot of the request. The store then answered
@@ -319,6 +335,7 @@ None of these is a limitation of the store, and each is stated as what it is:
   part of a family-wide fix measured across 32 repos by CALLING each one's
   `finish_run` rather than grepping for it.
 
-[Unreleased]: https://github.com/2scraper/googleplay-scraper/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/2scraper/googleplay-scraper/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/2scraper/googleplay-scraper/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/2scraper/googleplay-scraper/releases/tag/v0.2.0
 [0.1.0]: https://github.com/2scraper/googleplay-scraper/releases/tag/v0.1.0
