@@ -6,13 +6,20 @@ One HTTP request per page, no local browser, no Playwright install. The
 the HTML; this client parses it with the same `product_parser` the browser
 engines use, so the rows and columns are identical.
 
-NOT RUN ON THIS SITE YET
-------------------------
-This path has not been run against Google Play; no measurement of it is
-recorded in this repo. An unrun path says "not run", never "does not work" —
-a sibling repo once shipped a README telling readers a 2Captcha key would not
-help them, when the truth was that the client had not implemented the task
-type.
+WHAT WAS MEASURED HERE
+---------------------
+Run live 2026-10-22, one request each: a category grid (96 rows), a search
+with `hl=ja&gl=JP` (30 rows, JPY, Japanese titles), an app page (1 row, the
+detail columns filled) and a developer grid (10 rows), all exit 0 with a
+`.meta.json`, at $0.0003 or less per request as the API's own `x-debug`
+header reported. A `gl` Play does not serve came back as Play's HTTP 400 and
+exits 2.
+
+The same search through Playwright gave the same 30 apps with no field
+different. A category grid did differ — 82 of 96 apps shared — while the
+same grid fetched twice from one address was identical: which apps fill a
+grid's shelves depends on the address that asks, and this path asks from the
+API's.
 
 WHAT TO KNOW BEFORE USING IT HERE
 ---------------------------------
@@ -22,6 +29,10 @@ WHAT TO KNOW BEFORE USING IT HERE
 * One request is one page. A grid's further shelves and a reviews run's
   continuation token are followed by the browser engines, not by this
   client.
+* The market is pinned in the request: a URL without `hl`/`gl` gets the
+  browser engines' defaults (en, US) before it is sent, so the rows' market
+  columns describe what was fetched rather than whatever the API's exit
+  country would have chosen.
 
     python3 scraper_api_client.py \\
         --url "https://play.google.com/store/apps/category/GAME"
@@ -42,9 +53,13 @@ from typing import Optional
 
 import requests
 
+import urllib.parse
+
 from product_parser import (parse_products, detect_bot_challenge,
-                            detect_page_state, BOT_CHALLENGE_MARKERS)
-from output_writer import save
+                            detect_page_state, BOT_CHALLENGE_MARKERS,
+                            mode_for_url, with_market)
+from output_writer import finish_run
+import engine_core
 import env_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -243,6 +258,7 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
         with open(args.dump_html, "w", encoding="utf-8") as f:
             f.write(html)
         logger.info("Raw HTML written to %s", args.dump_html)
+    hl, gl = market_of(args.url)
 
     # Same policy as the browser engines. detect_page_state returns
     # `(state, reason)`; comparing the tuple itself to "blocked" never
@@ -277,8 +293,24 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
                      "playwright_scraper.py / puppeteer_scraper.py directly.")
         return 3
 
-    products = parse_products(html, args.url, category=args.category)
-    logger.info("Parsed %d products.", len(products))
+    # From here on, the same contract as the browser engines: the page state
+    # is read by the same `_handle_state`, rows carry `page` and `position`,
+    # and the run is written by the same `finish_run` — so a `.meta.json`
+    # sidecar exists and `diff_runs.py` can compare a Scraper API run with
+    # a browser run. Up to 0.2.0 this path wrote rows only, with `page` and
+    # `position` empty, and reported "0 products" as exit 4 whatever the
+    # page had been.
+    out = engine_core.RunOutcome()
+    products = []
+    if engine_core._handle_state(out, state, reason, 1):
+        products = parse_products(html, args.url, category=args.category,
+                                  hl=hl, gl=gl, page=1)
+        if products:
+            out.pages_completed = 1
+        else:
+            out.pages_failed.append(1)
+            out.stop_reason = "parser_found_nothing"
+    logger.info("Parsed %d products (page state %s).", len(products), state)
 
     if not products:
         dump = f"{args.out}_scraperapi_debug.html"
@@ -286,17 +318,43 @@ def _run_once(args, attempt: int = 1, attempts: int = 1) -> int:
             f.write(html)
         logger.warning("0 products parsed — saved the raw response to %s so you can see "
                        "what actually came back.", dump)
-        return 4
 
-    return save(products, args.out, args.format, allow_empty=args.allow_empty)
+    return finish_run(
+        products, args.out, args.format, args.allow_empty,
+        blocked=out.blocked, stop_reason=out.stop_reason,
+        pages_requested=1, pages_completed=out.pages_completed,
+        start_url=args.url, final_url=args.url,
+        pages_failed=out.pages_failed or None,
+        mode=mode_for_url(args.url) or "listing",
+        extra={"engine": "scraper_api", "gl": gl, "hl": hl})
+
+
+def market_of(url: str):
+    """`(hl, gl)` as the URL states them."""
+    query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
+    return query.get("hl") or "en", (query.get("gl") or "US").upper()
+
+
+def pin_market(url: str) -> str:
+    """Put `hl`/`gl` on a URL that lacks them, with the engines' defaults.
+
+    The browser engines always send both. Without them Play picks the market
+    from the address the request comes from — here the Scraper API's own exit,
+    whose country this client does not choose — while every row would still
+    be labelled with a default market. A row's market is a column on this
+    site because the rating and the currency follow it, so it is pinned in
+    the request rather than guessed afterwards.
+    """
+    hl, gl = market_of(url)
+    return with_market(url, hl, gl)
 
 
 def parse_args():
     p = argparse.ArgumentParser(
-        description="Google Play scraper — 2captcha Scraper API edition (no "
-                    "local browser). One request is one page; not run "
-                    "against this site yet — see this file's docstring, and "
-                    "prefer playwright_scraper.py.")
+        description="Google Play scraper — 2Captcha Scraper API edition (no "
+                    "local browser). One request is one page: a grid's "
+                    "further shelves and a reviews run's later pages are the "
+                    "browser engines' job.")
     # NOT required: prefer the TWOCAPTCHA_KEY env var. A key passed on the
     # command line is visible to anyone who can run `ps`, and it lands in
     # shell history and in any log that echoes the command line.
@@ -308,8 +366,11 @@ def parse_args():
                         "app page or a developer page). Required, unless "
                         "GOOGLEPLAY_URL is set in the environment or in .env.")
     p.add_argument("--category", default=None, help="Label to tag output rows with. Defaults to the category segment of the URL, so the column is never empty just because the flag was omitted.")
-    p.add_argument("--format", choices=["json", "csv", "both"], default="both")
-    p.add_argument("--out", default="googleplay_apps_scraperapi", help="Output file prefix")
+    p.add_argument("--format", choices=["json", "csv", "both"], default="json")
+    p.add_argument("--out", default="googleplay_apps_scraperapi",
+                   help="output prefix: writes PREFIX.json / .csv / .meta.json. "
+                        "A trailing .json or .csv is dropped, and missing "
+                        "directories are created.")
     p.add_argument("--timeout", type=int, default=60,
                    help=f"API-side task timeout in seconds (1-{MAX_API_TIMEOUT}, default 60)")
     p.add_argument("--cdp-url", default=None,
@@ -346,6 +407,14 @@ def parse_args():
     if not args.url:
         p.error("no --url given, and GOOGLEPLAY_URL is not set in the environment "
                 "or in .env.")
+    args.url = pin_market(args.url)
+    args.out = os.path.expanduser(engine_core.output_prefix(args.out))
+    if args.dump_html:
+        args.dump_html = os.path.expanduser(args.dump_html)
+    for flag, path in (("--out", args.out), ("--dump-html", args.dump_html)):
+        problem = engine_core.ensure_parent_dir(path)
+        if problem:
+            p.error(f"{flag} {path}: {problem}")
     return args
 
 

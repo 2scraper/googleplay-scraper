@@ -10,6 +10,12 @@ __pycache__/
 .fingerprint_cache/
 .venv/
 venv/
+# One virtualenv per engine is what the README recommends, under any name;
+# and captures/ is test material the image never copies. Neither belongs in
+# the build context: ~240 MB of it was sent to the daemon on every build.
+.venv-*/
+venv-*/
+captures/
 env/
 googleplay_apps.*
 *_debug.html

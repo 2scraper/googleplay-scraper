@@ -1984,6 +1984,118 @@ def test_cdp_teardown_pyppeteer():
     return ok
 
 
+def test_scraper_api_contract():
+    """The Scraper API path writes what the browser engines write.
+
+    Driven through its own `main()` with the network call replaced by a real
+    capture. Up to 0.2.0 it wrote rows only — `page` and `position` empty, no
+    `.meta.json`, so `diff_runs.py` could not use its output — and labelled
+    every row with the default market whatever the URL asked for.
+    """
+    import scraper_api_client as api
+    ok = True
+    grid, missing = capture("search_vpn_jp.html"), capture("notfound.html")
+    if None in (grid, missing):
+        skip("scraper-api", "captures needed")
+        return True
+
+    def run(url, page, extra=()):
+        saved_fetch, saved_argv = api.fetch_html, sys.argv
+        sent = {}
+
+        def fake_fetch(args):
+            sent["url"] = args.url
+            return page
+
+        api.fetch_html = fake_fetch
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = os.path.join(tmp, "api.json")
+            sys.argv = ["scraper_api_client.py", "--key", "test-key", "--url", url,
+                        "--out", prefix, "--retries", "0", *extra]
+            try:
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    rc = api.main()
+            except SystemExit as exc:
+                rc = exc.code
+            finally:
+                api.fetch_html, sys.argv = saved_fetch, saved_argv
+            got = {}
+            for ext in (".json", ".meta.json", ".csv"):
+                path = os.path.join(tmp, "api" + ext)
+                if os.path.exists(path):
+                    with open(path, encoding="utf-8") as fh:
+                        got[ext] = fh.read()
+            return rc, got, sent
+
+    rc, files, sent = run("https://play.google.com/store/search?q=vpn&c=apps&hl=ja&gl=JP",
+                          (grid, 200))
+    rows = json.loads(files.get(".json", "[]"))
+    meta = json.loads(files.get(".meta.json", "{}"))
+    ok &= check("[api] a served grid is exit 0", rc == 0, f"rc={rc}")
+    ok &= check("[api] --out api.json writes api.json, not api.json.json",
+                ".json" in files)
+    ok &= check("[api] json is the default format, like the engines",
+                ".csv" not in files)
+    ok &= check("[api] a .meta.json sidecar is written", meta.get("status") == "complete",
+                str(meta)[:120])
+    ok &= check("[api] rows carry page and position",
+                rows and all(r["page"] == 1 for r in rows)
+                and [r["position"] for r in rows] == list(range(1, len(rows) + 1)))
+    ok &= check("[api] rows carry the URL's market, not a default",
+                rows and all((r["gl"], r["hl"]) == ("JP", "ja") for r in rows),
+                str(rows[0]["gl"] if rows else None))
+
+    rc, _files, sent = run("https://play.google.com/store/apps/category/GAME", (grid, 200))
+    ok &= check("[api] a URL without a market is sent WITH the engines' default",
+                "gl=US" in sent.get("url", "") and "hl=en" in sent.get("url", ""),
+                sent.get("url"))
+
+    rc, files, _ = run("https://play.google.com/store/apps/details?id=com.no.such.app",
+                       (missing, 404))
+    ok &= check("[api] a package id that does not exist is exit 4", rc == 4, f"rc={rc}")
+
+    app = capture("app_free_us.html")
+    if app is not None:
+        rc, files, _ = run("https://play.google.com/store/apps/details?id=com.whatsapp",
+                           (app, 200))
+        rows = json.loads(files.get(".json", "[]"))
+        ok &= check("[api] an app row is page 1, position 1, like the engines'",
+                    rows and (rows[0]["page"], rows[0]["position"]) == (1, 1),
+                    str(rows and (rows[0]["page"], rows[0]["position"])))
+    return ok
+
+
+def test_url_market_precedence():
+    """A market typed in --url outranks the default; a typed flag outranks the URL."""
+    import engine_core
+    ok = True
+    jp = "https://play.google.com/store/search?q=vpn&c=apps&hl=ja&gl=JP"
+    cases = (
+        ([jp], "JP", "ja"),
+        ([jp, "--gl", "DE"], "DE", "ja"),
+        (["https://play.google.com/store/search?q=vpn&c=apps"], "US", "en"),
+    )
+    for argv, gl, hl in cases:
+        args = engine_core.build_parser().parse_args(["--url", *argv])
+        with redirect_stderr(io.StringIO()):
+            _mode, url, _err = engine_core.resolve_target(args)
+        ok &= check(f"[market] {' '.join(argv[1:]) or 'no flags'} on {argv[0][-22:]}"
+                    f" -> gl={gl} hl={hl}",
+                    (args.gl, args.hl) == (gl, hl) and f"gl={gl}" in url
+                    and f"hl={hl}" in url, f"{args.gl} {args.hl} {url}")
+
+    page = capture("search_vpn_jp.html")
+    if page is not None:
+        rc, world, files = _run_main(["--url", jp], [(page, 200)])
+        rows = json.loads(files.get(".json", "[]"))
+        ok &= check("[market] --url with gl=JP is fetched as JP",
+                    world["fetches"] and "gl=JP" in world["fetches"][0][0],
+                    str(world["fetches"][:1]))
+        ok &= check("[market] and its rows say JP",
+                    rows and all((r["gl"], r["hl"]) == ("JP", "ja") for r in rows))
+    return ok
+
+
 def test_run_contract_captcha_budget():
     """At most one paid solve per page, whatever retries and rotations do."""
     ok = True
@@ -2256,7 +2368,36 @@ def test_diff_refuses_two_markets_in_one_currency():
         ok &= check("[diff] two markets sharing a currency are refused",
                     verdict is False and "different markets" in buf.getvalue(),
                     buf.getvalue()[-300:])
+        # The advice must follow the reason. Both runs here are COMPLETE, so
+        # "re-run the incomplete side" — what every refusal used to end with —
+        # would send the reader to re-run something that did not fail.
+        # Read the ADVICE line itself: the problem text above it also says
+        # "same --gl", and a check on the whole output passed with the advice
+        # broken.
+        advice = _advice_line(buf.getvalue())
+        ok &= check("[diff] the advice for two markets is the same --gl",
+                    "same --gl" in advice, repr(advice))
+        ok &= check("[diff] and not to re-run a side that was complete",
+                    "incomplete" not in advice.lower(), repr(advice))
+
+        # And for an incomplete run, that IS the advice.
+        meta = os.path.join(tmp, "DE.meta.json")
+        with open(meta, "w", encoding="utf-8") as fh:
+            json.dump({"status": "partial", "pages_completed": 1,
+                       "pages_requested": 3, "stop_reason": "x"}, fh)
+        args = _ap.Namespace(old=paths["DE"], new=paths["DE"], force=False)
+        buf = io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(buf):
+            diff_runs._check_comparable(args)
+        advice = _advice_line(buf.getvalue())
+        ok &= check("[diff] an incomplete run is told to re-run that side",
+                    "re-run the incomplete side" in advice, repr(advice))
     return ok
+
+
+def _advice_line(output):
+    lines = [l.strip() for l in output.splitlines() if "To compare them:" in l]
+    return lines[0] if lines else ""
 
 
 def test_workflows_import_no_local_module_inline():
@@ -2325,6 +2466,8 @@ def main():
         test_cdp_connect_policy,
         test_cdp_teardown_playwright,
         test_cdp_teardown_pyppeteer,
+        test_scraper_api_contract,
+        test_url_market_precedence,
         test_run_contract_captcha_budget,
         test_cli_rejects_counts_that_cannot_run,
         test_env_url_does_not_override_a_typed_builder_flag,

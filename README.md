@@ -206,7 +206,8 @@ package ids were identical.
 |---|---|---|
 | **Playwright** (primary) | `requirements-playwright.txt` | the one to use |
 | Selenium | `requirements-selenium.txt` | no authenticated remote CDP endpoint (`--cdp-endpoint` is refused, exit 2); `--proxy-server` cannot authenticate at all, so credentials are stripped and a warning printed; exposes no HTTP status, so classification leans on the structural signals (Play's own 404 template is recognised from its body); `--fingerprint` is refused |
-| pyppeteer | `requirements-puppeteer.txt` | effectively unmaintained upstream; here for parity; `--fingerprint` is refused |
+| pyppeteer | `requirements-puppeteer.txt` | effectively unmaintained upstream; here for parity; `--fingerprint` is refused. On Apple Silicon Macs, use it through `--cdp-endpoint` or use Playwright: the Chromium pyppeteer downloads comes from its `Mac` (x86_64) snapshot channel — it has no Apple Silicon entry — and was reported to crash on macOS arm64 |
+| Scraper API | `scraper_api_client.py --url …` | no local browser: the 2Captcha Scraper API fetches one page per request (measured 2026-10-22 at $0.0003 or less each). Same rows, `.meta.json` and exit codes as the browser engines; a grid's further shelves and later review pages are the browser engines' job. Which apps fill a category's shelves depends on the requesting address, so a grid can differ from a local run (82 of 96 apps shared in one comparison) while a search came back identical |
 | Scraping Browser API | `--cdp-endpoint` | a managed browser; never stack `--proxy` or `--fingerprint` on it. Playwright and pyppeteer open their own page on it and leave the browser running when the run ends; a handshake refused with HTTP 500/502/503 is retried twice (3 s, 6 s), anything else fails at once with exit 5 |
 
 **Install exactly one per virtualenv.** Playwright and pyppeteer declare
@@ -228,6 +229,12 @@ every repo in this family; Play's own follow. See
 
 Exit codes: `0` ok · `1` crash · `2` bad usage · `3` blocked · `4` zero
 apps · `5` **the content was never obtained** · `6` partial.
+
+`original_price` and `discount_pct` are part of the family prefix and are
+null on every row: 0 of 411 rows parsed from the captures and 0 of 877 rows
+from live runs on 2026-10-22. Play does show a struck-through price on some
+discounted paid apps; this repository has no capture of one and does not read
+a was-price, so the columns stay empty rather than guess.
 
 `5` and `4` are the distinction worth knowing: a run that never got its page
 must not report "the catalogue is empty", or a dead proxy and an empty
@@ -265,6 +272,9 @@ many cells differ.
   2026-10-22) gets Play's own HTTP 400 page, which this scraper reports as a
   usage error naming the flag — with no retries and no proxy advice. `ZZ`, by
   contrast, is answered with a full page.
+* **A market in `--url` is kept.** `--url "…/search?q=vpn&hl=ja&gl=JP"`
+  fetches Japan; `--gl`/`--hl` replace it only when typed, and say so. Up to
+  0.2.0 the defaults (`US`, `en`) silently replaced it.
 * **`--out` is a prefix.** `--out data/run.json` writes `data/run.json`,
   `data/run.csv` and `data/run.meta.json`, creating `data/` if needed.
 * **`genre_id` is null on every listing row, and that is the store.** A grid
