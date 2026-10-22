@@ -26,6 +26,7 @@ docstring for why that is shared rather than copied.
 """
 
 import sys
+import time
 from typing import Any, Dict, Optional, Tuple
 
 # Imported at MODULE level on purpose: the smoke suite must be able to skip
@@ -46,11 +47,17 @@ class PlaywrightDriver:
 
     name = NAME
 
-    def __init__(self, pw_ctx, browser, context, page) -> None:
+    def __init__(self, pw_ctx, browser, context, page, connected: bool = False,
+                 owns_context: bool = True) -> None:
         self._pw_ctx = pw_ctx
         self._browser = browser
         self._context = context
         self._page = page
+        # Whether the browser was reached over --cdp-endpoint rather than
+        # launched here, and so which parts of it this run may tear down.
+        self._connected = connected
+        self._owns_context = owns_context
+        self._owns_page = True
 
     def fetch(self, url: str, mode: str) -> Tuple[str, Optional[int]]:
         """One navigation.
@@ -95,10 +102,54 @@ class PlaywrightDriver:
         return self._page.url
 
     def close(self) -> None:
+        """Leave the browser the way it was found.
+
+        A browser this engine LAUNCHED is closed. One it CONNECTED to over
+        `--cdp-endpoint` belongs to somebody else: only the page — and the
+        context, if this run created it — are closed, and then the connection
+        is dropped. `Browser.close()` on a CDP connection only disconnects, so
+        the page opened for the run stayed open in the remote browser: one
+        more tab per run (1 -> 2 -> 3 over two runs, measured 2026-10-22 on a
+        local Chrome with --remote-debugging-port).
+        """
         try:
+            if self._connected:
+                for owned in (self._page if self._owns_page else None,
+                              self._context if self._owns_context else None):
+                    if owned is None:
+                        continue
+                    try:
+                        owned.close()
+                    except PlaywrightError:
+                        pass        # already gone with the remote session
             self._browser.close()
         finally:
             self._pw_ctx.__exit__(None, None, None)
+
+
+def _connect_over_cdp(pw, endpoint: str):
+    """`connect_over_cdp`, retrying the handshake refusals worth retrying.
+
+    Playwright reports a refused handshake at once ("WebSocket error: ...
+    500 Internal Server Error"), so the policy in `page_flow` decides whether
+    to wait and try again; anything else is raised to the caller as it was.
+    """
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            return pw.chromium.connect_over_cdp(
+                endpoint, timeout=engine_core.DEFAULT_TIMEOUT_MS)
+        except PlaywrightError as exc:
+            if (attempt >= page_flow.CDP_CONNECT_ATTEMPTS
+                    or not page_flow.cdp_connect_retriable(exc)):
+                raise
+            delay = page_flow.cdp_connect_delay(attempt)
+            print(f"[warn] the CDP endpoint refused the connection (HTTP "
+                  f"{page_flow.cdp_connect_status(exc)}); retrying in "
+                  f"{delay:.0f}s ({attempt}/{page_flow.CDP_CONNECT_ATTEMPTS})",
+                  file=sys.stderr)
+            time.sleep(delay)
 
 
 def launch(args, proxy_url: Optional[str]) -> PlaywrightDriver:
@@ -115,10 +166,17 @@ def launch(args, proxy_url: Optional[str]) -> PlaywrightDriver:
         # Never set a UA, a fingerprint or a proxy over CDP: the remote
         # browser brings its own identity and stacking a second one
         # manufactures a contradiction rather than better cover.
-        browser = pw.chromium.connect_over_cdp(
-            args.cdp_endpoint, timeout=engine_core.DEFAULT_TIMEOUT_MS)
-        context = browser.contexts[0] if browser.contexts else browser.new_context()
-        return PlaywrightDriver(pw_ctx, browser, context, context.new_page())
+        try:
+            browser = _connect_over_cdp(pw, args.cdp_endpoint)
+        except BaseException:
+            pw_ctx.__exit__(None, None, None)
+            raise
+        owns_context = not browser.contexts
+        context = browser.new_context() if owns_context else browser.contexts[0]
+        # A NEW page, always: the remote browser's existing tabs are its
+        # owner's, and this run closes only what it opened.
+        return PlaywrightDriver(pw_ctx, browser, context, context.new_page(),
+                                connected=True, owns_context=owns_context)
 
     context_kwargs: Dict[str, Any] = {}
     init_script = None

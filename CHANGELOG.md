@@ -79,6 +79,25 @@ discovered from a bill or a diff.
   matches (`git check-ignore --no-index`). Without that it never reported a
   file already tracked, so it only worked until the fixture was committed.
 
+- **pyppeteer no longer shuts down a browser it connected to.** Over
+  `--cdp-endpoint` its teardown sent CDP `Browser.close`, killing the browser
+  on the other end — a local Chrome, or the session on the Scraping Browser
+  API — and printing `Event loop is closed` tracebacks; the next run then
+  hung. A connected browser now has its page closed and the connection
+  dropped. It also took the remote browser's own first tab and navigated it
+  away; it now opens a new page.
+- **A CDP endpoint that refuses the handshake no longer hangs pyppeteer.**
+  pyppeteer's own `connect()` swallowed a refused port or an HTTP 500 into a
+  background task and waited for an answer that never came. The connection
+  now raises the real reason (`HTTP 500`, `Connection refused`, or a
+  handshake that never completed) within the timeout.
+- **Playwright closes the page it opened over CDP.** One tab was left in the
+  remote browser per run (1 → 2 → 3 over two runs on a local Chrome).
+- **Both engines retry a CDP handshake refused with HTTP 500, 502 or 503**
+  twice, after 3 s and 6 s. A managed browser can refuse for a few seconds
+  while a previous session on the same profile closes. Other refusals —
+  401, a closed port, a timeout — fail at once.
+
 ### Changed
 
 - CI only: the canary now runs weekly (Mondays 06:17 UTC) instead of daily, and on a manual dispatch.

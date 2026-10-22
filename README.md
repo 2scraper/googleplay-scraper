@@ -207,7 +207,7 @@ package ids were identical.
 | **Playwright** (primary) | `requirements-playwright.txt` | the one to use |
 | Selenium | `requirements-selenium.txt` | no authenticated remote CDP endpoint (`--cdp-endpoint` is refused, exit 2); `--proxy-server` cannot authenticate at all, so credentials are stripped and a warning printed; exposes no HTTP status, so classification leans on the structural signals (Play's own 404 template is recognised from its body); `--fingerprint` is refused |
 | pyppeteer | `requirements-puppeteer.txt` | effectively unmaintained upstream; here for parity; `--fingerprint` is refused |
-| Scraping Browser API | `--cdp-endpoint` | a managed browser; never stack `--proxy` or `--fingerprint` on it |
+| Scraping Browser API | `--cdp-endpoint` | a managed browser; never stack `--proxy` or `--fingerprint` on it. Playwright and pyppeteer open their own page on it and leave the browser running when the run ends; a handshake refused with HTTP 500/502/503 is retried twice (3 s, 6 s), anything else fails at once with exit 5 |
 
 **Install exactly one per virtualenv.** Playwright and pyppeteer declare
 mutually unsatisfiable pins (`pyee` <12 vs ≥13) and pyppeteer and selenium
