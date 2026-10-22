@@ -56,6 +56,29 @@ discovered from a bill or a diff.
   v2. Measured 2026-10-22 on Google's own demos in Playwright, Selenium and
   pyppeteer; with the corrected kind both v2 demos were solved and accepted.
 
+- **A `--gl` Play does not serve is exit 2, not exit 3.** Play answers such a
+  code (`USA`, `xx`, `12`) with its own HTTP 400 page, which carries no store
+  images and was read as a block: fresh browsers, exit 3, and advice to buy a
+  proxy. It is now a usage error naming the flag, with no retries. `--gl` is
+  also checked for shape (two letters) before any browser starts.
+- **`screenshot_count` on app rows** counts the screenshots. The app page
+  wraps the list one level deeper than a grid tile, and the wrapper was
+  counted: 1 on every app row (WhatsApp has 9, Minecraft 8). Grid rows were
+  right and are unchanged.
+- **A run's last-page reason survives.** When the page that met `--pages` was
+  the one that added nothing, `stop_reason` was overwritten with `completed`;
+  it now says `no_new_products`. The run is still complete; only the reason
+  was wrong. The same line in the reviews loop is gone too.
+- **`--out x.json` writes `x.json`**, not `x.json.json`: a trailing `.json`,
+  `.csv` or `.meta.json` is dropped from the prefix.
+- **`--out` and `--dump-html` create missing directories**, and a path that
+  cannot be created is exit 2 before any browser starts. A `--dump-html` into
+  a missing directory used to fail mid-run and be reported as
+  `navigation_failed`, exit 5, about a page that had been fetched.
+- The check that every capture is committable now asks whether an ignore rule
+  matches (`git check-ignore --no-index`). Without that it never reported a
+  file already tracked, so it only worked until the fixture was committed.
+
 ### Changed
 
 - CI only: the canary now runs weekly (Mondays 06:17 UTC) instead of daily, and on a manual dispatch.

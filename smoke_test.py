@@ -193,6 +193,10 @@ def test_paid_app_values():
                 row.iap_price_range)
     ok &= check("[paid] offers_iap follows the range", row.offers_iap is True)
     ok &= check("[paid] genre_id", row.genre_id == "GAME_ARCADE", row.genre_id)
+    # The app page wraps its screenshots one level deeper than a grid tile;
+    # counting the wrapper reported 1 on every app row up to 0.2.0.
+    ok &= check("[paid] screenshot_count", row.screenshot_count == 8,
+                str(row.screenshot_count))
     return ok
 
 
@@ -330,6 +334,11 @@ def test_page_state_on_every_capture():
     return ok
 
 
+# Captures of Play's own error pages. Real responses, and the controls for
+# the structural signal: neither is built out of the store's images.
+_REFUSAL_CAPTURES = ("notfound.html", "bad_request_gl.html")
+
+
 def test_markers_score_zero_on_good_pages():
     """A marker that matches a page you know is good is not a marker.
 
@@ -341,7 +350,7 @@ def test_markers_score_zero_on_good_pages():
     """
     ok = True
     served = [n for n in os.listdir(os.path.join(HERE, "captures"))
-              if n.endswith(".html") and n != "notfound.html"]
+              if n.endswith(".html") and n not in _REFUSAL_CAPTURES]
     if not served:
         skip("markers", "no captures")
         return True
@@ -354,11 +363,15 @@ def test_markers_score_zero_on_good_pages():
                     parser.asset_reference_count(html) >= parser.MIN_ASSET_REFERENCES)
     # The 404 is the control: it is a real Play response and carries NONE of
     # the image host, which is what makes the structural signal usable.
-    nf = capture("notfound.html")
-    if nf is not None:
-        ok &= check("[marker] the store's 404 carries no image-host references",
-                    parser.asset_reference_count(nf) == 0,
-                    str(parser.asset_reference_count(nf)))
+    for name in _REFUSAL_CAPTURES:
+        page = capture(name)
+        if page is not None:
+            ok &= check(f"[marker] {name} carries no image-host references",
+                        parser.asset_reference_count(page) == 0,
+                        str(parser.asset_reference_count(page)))
+            ok &= check(f"[marker] {name} trips no refusal marker",
+                        parser.challenge_marker(page) is None,
+                        "it is the store answering, not refusing")
     ok &= check("[marker] the set carries no reCAPTCHA spelling",
                 not any("recaptcha" in m.lower() or "sitekey" in m.lower()
                         for m in parser.BOT_CHALLENGE_MARKERS),
@@ -1286,7 +1299,8 @@ class _FakeDriver:
 
 
 def _run_main(argv, pages, posts=(), discovery=None, after_solve=None,
-              launch_error=None, env=None):
+              launch_error=None, env=None, out_name=None, dump=None,
+              prepare=None):
     """`(rc, world, out_prefix_files)` for one `engine_core.main` run."""
     import engine_core
     world = {"pages": list(pages), "posts": list(posts), "forms": [], "fetches": [],
@@ -1305,15 +1319,23 @@ def _run_main(argv, pages, posts=(), discovery=None, after_solve=None,
     os.environ.update(env or {})
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            prefix = os.path.join(tmp, "o")
+            prefix = os.path.join(tmp, out_name or "o")
+            extra = ["--out", prefix, "--format", "both"]
+            if dump:
+                extra += ["--dump-html", os.path.join(tmp, dump)]
+            if prepare:
+                prepare(tmp)
             buf = io.StringIO()
             with redirect_stdout(buf), redirect_stderr(buf):
                 try:
-                    rc = engine_core.main(launch, list(argv) + ["--out", prefix,
-                                                                "--format", "both"])
+                    rc = engine_core.main(launch, list(argv) + extra)
                 except SystemExit as exc:
                     rc = exc.code
+                prefix = engine_core.output_prefix(prefix)
             world["log"] = buf.getvalue()
+            world["written"] = sorted(
+                os.path.relpath(os.path.join(d, f), tmp)
+                for d, _dirs, fs in os.walk(tmp) for f in fs)
             files = {}
             for ext in (".json", ".csv", ".meta.json"):
                 if os.path.exists(prefix + ext):
@@ -1614,9 +1636,138 @@ def test_captures_are_committable():
     ok &= check("[captures] the directory is not empty", bool(names))
     for name in names:
         rel = os.path.join("captures", name)
-        r = subprocess.run(["git", "check-ignore", "-q", rel], cwd=HERE)
+        # `--no-index`: ask whether an ignore RULE matches, whatever the
+        # index says. Without it a file already tracked is never reported, so
+        # the check only worked until the fixture was committed — and the
+        # trap is the rule, which will swallow the NEXT capture added.
+        r = subprocess.run(["git", "check-ignore", "-q", "--no-index", rel],
+                           cwd=HERE)
         ok &= check(f"[captures] {rel} is not gitignored", r.returncode != 0,
                     "a fixture git will not commit makes its check skip in CI")
+    return ok
+
+
+def test_screenshot_count_on_both_routes():
+    ok = True
+    for name, package, want in (("app_free_us.html", "com.whatsapp", 9),
+                                ("app_iap_us.html", "com.mojang.minecraftpe", 8)):
+        html = capture(name)
+        if html is None:
+            skip("screenshots", f"captures/{name} absent")
+            continue
+        row = parser.parse_detail(html, package)
+        ok &= check(f"[screenshots] {name}: {want} on the app page",
+                    row is not None and row.screenshot_count == want,
+                    str(row and row.screenshot_count))
+    grid = capture("search_vpn_us.html")
+    if grid is not None:
+        rows = parser.parse_grid(grid)
+        ok &= check("[screenshots] a grid tile still counts its own list",
+                    rows and all((r.screenshot_count or 0) > 1 for r in rows[:5]),
+                    str([r.screenshot_count for r in rows[:5]]))
+    return ok
+
+
+def test_run_contract_last_page_reason_survives():
+    """A run's last page adding nothing is `no_new_products`, not `completed`.
+
+    A line after the loop set `completed` whenever the page budget was met,
+    which overwrote the true reason when the page that met it was the one
+    that added nothing (30 / 20 / 0 rows over three pages in the report).
+    """
+    ok = True
+    page1, shelf = capture("cat_game_us.html"), capture("cluster_us.html")
+    if None in (page1, shelf):
+        skip("run-contract", "category and cluster captures needed")
+        return True
+    rc, world, files = _run_main(
+        ["--mode", "listing", "--category", "GAME", "--pages", "3"],
+        [(page1, 200), (shelf, 200), (shelf, 200)])
+    meta = json.loads(files.get(".meta.json", "{}"))
+    ok &= check("[contract] three pages were fetched", len(world["fetches"]) == 3,
+                str(len(world["fetches"])))
+    ok &= check("[contract] the last page's reason survives",
+                meta.get("stop_reason") == "no_new_products",
+                str(meta.get("stop_reason")))
+    ok &= check("[contract] and the run is still complete",
+                rc == 0 and meta.get("status") == "complete",
+                f"rc={rc} {meta.get('status')}")
+    return ok
+
+
+def test_run_contract_bad_gl_is_usage():
+    """A country Play does not serve is the caller's mistake, not a block."""
+    ok = True
+    body = capture("bad_request_gl.html")
+    if body is None:
+        skip("run-contract", "captures/bad_request_gl.html absent")
+        return True
+    for status, why in ((400, "http_400"), (None, "bad_request_template")):
+        state, reason = parser.detect_page_state(body, status, "", "grid")
+        ok &= check(f"[gl] Play's 400 page with status {status} is bad_request",
+                    (state, reason) == ("bad_request", why), f"{state} {reason}")
+
+    # Malformed shape: refused by argparse before any browser starts.
+    rc, world, _ = _run_main(["--mode", "listing", "--category", "GAME",
+                              "--gl", "USA"], [(body, 400)])
+    ok &= check("[gl] --gl USA is exit 2", rc == 2, f"rc={rc}")
+    ok &= check("[gl] and launches nothing", world["launches"] == [],
+                str(world["launches"]))
+
+    # Well-shaped, but a code Play does not serve: its own 400.
+    rc, world, files = _run_main(["--mode", "listing", "--category", "GAME",
+                                  "--gl", "xx", "--retries", "2"], [(body, 400)])
+    ok &= check("[gl] Play's 400 is exit 2, not 3", rc == 2, f"rc={rc}")
+    ok &= check("[gl] and is not retried", len(world["fetches"]) == 1,
+                f"{len(world['fetches'])} fetches")
+    ok &= check("[gl] the message names the flag", "--gl XX" in world["log"],
+                world["log"][-300:])
+    ok &= check("[gl] no proxy advice for a typo", "[hint]" not in world["log"])
+    ok &= check("[gl] no output written", not files, str(list(files)))
+    return ok
+
+
+def test_run_contract_output_paths():
+    """`--out` with an extension, and paths into directories that do not exist."""
+    ok = True
+    page1 = capture("search_vpn_us.html")
+    if page1 is None:
+        skip("run-contract", "captures/search_vpn_us.html absent")
+        return True
+    argv = ["--mode", "search", "--query", "vpn"]
+
+    rc, world, files = _run_main(argv, [(page1, 200)],
+                                 out_name="nested/deeper/run.json",
+                                 dump="dumps/here/p")
+    written = world["written"]
+    ok &= check("[out] the run succeeds into directories it had to create",
+                rc == 0, f"rc={rc}")
+    ok &= check("[out] --out run.json writes run.json, run.csv, run.meta.json",
+                {"nested/deeper/run.json", "nested/deeper/run.csv",
+                 "nested/deeper/run.meta.json"} <= set(written), str(written))
+    ok &= check("[out] and no doubled suffix",
+                not any(".json.json" in w or ".json.csv" in w for w in written),
+                str(written))
+    ok &= check("[out] --dump-html into a new directory writes its snapshot",
+                any(w.startswith("dumps/here/p_") and w.endswith(".html")
+                    for w in written), str(written))
+
+    def make_blocker(tmp):
+        with open(os.path.join(tmp, "blocker"), "w") as fh:
+            fh.write("a file where a directory is wanted")
+    rc, world, _ = _run_main(argv, [(page1, 200)], out_name="blocker/run",
+                             prepare=make_blocker)
+    ok &= check("[out] an --out that cannot be created is exit 2", rc == 2,
+                f"rc={rc}")
+    ok &= check("[out] and is refused before any browser starts",
+                world["launches"] == [], str(world["launches"]))
+
+    import engine_core
+    with redirect_stderr(io.StringIO()):
+        for given, want in (("x.json", "x"), ("x.CSV", "x"), ("x.meta.json", "x"),
+                            ("run.2026", "run.2026"), (".json", ".json"), ("x", "x")):
+            got = engine_core.output_prefix(given)
+            ok &= check(f"[out] output_prefix({given!r}) == {want!r}", got == want, got)
     return ok
 
 
@@ -1954,6 +2105,10 @@ def main():
         test_run_contract_reviews_pages_chain_on_the_token,
         test_recaptcha_variant_on_googles_demos,
         test_captures_are_committable,
+        test_screenshot_count_on_both_routes,
+        test_run_contract_last_page_reason_survives,
+        test_run_contract_bad_gl_is_usage,
+        test_run_contract_output_paths,
         test_run_contract_captcha_budget,
         test_cli_rejects_counts_that_cannot_run,
         test_env_url_does_not_override_a_typed_builder_flag,

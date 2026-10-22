@@ -44,6 +44,7 @@ while Playwright and pyppeteer take `() => expr`.
 """
 
 import argparse
+import os
 import re
 import sys
 import time
@@ -98,6 +99,21 @@ non_negative_int = _int_at_least(0)
 non_negative_float = _float_between(0.0)
 
 
+def country_code(text: str) -> str:
+    """`--gl`: two letters, upper-cased.
+
+    Only the SHAPE is checked here. Whether Play serves that country is the
+    store's answer, not a list this file could keep current — `ZZ` is two
+    letters and Play answers it with a full page — so a well-shaped code Play
+    refuses is caught from its HTTP 400 instead (see `fetch_page`).
+    """
+    if not (isinstance(text, str) and len(text) == 2 and text.isascii()
+            and text.isalpha()):
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not a two-letter country code (e.g. US, DE, JP)")
+    return text.upper()
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description="Scrape Google Play listings, apps, developers and reviews.")
@@ -111,9 +127,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--query", help="a search query (--mode search)")
     ap.add_argument("--app-id", help="an Android package id, e.g. com.whatsapp")
     ap.add_argument("--developer", help="a developer id or name")
-    ap.add_argument("--gl", default="US",
-                    help="the MARKET. Changes the rating, the currency and "
-                         "which apps are listed. Default US.")
+    ap.add_argument("--gl", default="US", type=country_code,
+                    help="the MARKET, as a two-letter country code. Changes "
+                         "the rating, the currency and which apps are listed. "
+                         "A code Play does not serve is exit 2. Default US.")
     ap.add_argument("--hl", default="en", help="the display language. Default en.")
     ap.add_argument("--pages", type=positive_int, default=1,
                     help="how many fetches to make. On a grid this follows "
@@ -133,7 +150,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="drop reviewer name, profile id and avatar from "
                          "review rows")
     ap.add_argument("--format", default="json", choices=("json", "csv", "both"))
-    ap.add_argument("--out", default=DEFAULT_OUT_PREFIX)
+    ap.add_argument("--out", default=DEFAULT_OUT_PREFIX,
+                    help="output prefix: writes PREFIX.json / .csv / "
+                         ".meta.json. A trailing .json or .csv is dropped, "
+                         "and missing directories are created.")
     ap.add_argument("--delay", type=non_negative_float, default=1.5,
                     help="seconds between fetches")
     ap.add_argument("--retries", type=non_negative_int, default=2,
@@ -177,7 +197,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--allow-empty", action="store_true")
     ap.add_argument("--dump-html", metavar="PREFIX",
                     help="write each fetched page; on success too, not only "
-                         "on failure")
+                         "on failure. Missing directories are created.")
     headless = ap.add_mutually_exclusive_group()
     headless.add_argument("--headless", dest="headless", action="store_true",
                           default=True)
@@ -396,6 +416,16 @@ def fetch_page(session: Session, url: str, mode: str, page_num: int,
         _dump(args, dump_name, html)
         state, reason = page_flow.classify(html, status, url, mode)
 
+        if state == "bad_request":
+            # Play's own HTTP 400: the request is malformed, so no retry, no
+            # solve and no other exit will change the answer. It used to be
+            # read as a block — exit 3, fresh browsers, and advice to buy a
+            # proxy — for a country code Play does not serve.
+            raise UsageError(
+                f"Play refused the request as malformed (HTTP 400) — "
+                f"usually because --gl {args.gl} is not a country the store "
+                f"serves. Use one it does, e.g. US, DE, JP.")
+
         if state != "content" and _wants_solve(args, state):
             solved = _solve(session, html, url, mode, page_num)
             if solved is not None:
@@ -537,8 +567,6 @@ def run_grid(session: Session, start_url: str, mode: str,
         if out.pages_completed < args.pages and queue:
             _sleep(args.delay)
 
-    if out.pages_completed >= args.pages and not out.pages_failed:
-        out.stop_reason = "completed"
     out.extra["shelves_seen"] = len(visited)
     return out
 
@@ -656,8 +684,6 @@ def run_reviews(session: Session, url: str, args: argparse.Namespace) -> RunOutc
             break
         _sleep(args.delay)
 
-    if out.pages_completed >= args.pages and not out.pages_failed:
-        out.stop_reason = "completed"
     out.extra["reviews_per_call"] = args.reviews_per_call
     out.extra["authors_included"] = not args.no_authors
     return out
@@ -694,6 +720,50 @@ def _dump(args: argparse.Namespace, name: str, html: str) -> None:
     print(f"[dump] {path} ({len(html)} bytes)", file=sys.stderr)
 
 
+_OUTPUT_SUFFIXES = (".meta.json", ".json", ".csv")
+
+
+def output_prefix(out: str) -> str:
+    """`--out x.json` writes `x.json`, `x.csv` and `x.meta.json`.
+
+    `--out` is a PREFIX — the run writes up to three files from it — and
+    passing a filename with its extension is the most common way people use
+    such a flag. Taken literally it produced `x.json.json`, `x.json.csv` and
+    `x.json.meta.json`. A recognised output suffix is now dropped; anything
+    else (`--out run.2026`) is left alone.
+    """
+    lowered = out.lower()
+    for suffix in _OUTPUT_SUFFIXES:
+        if lowered.endswith(suffix) and len(out) > len(suffix):
+            trimmed = out[:-len(suffix)]
+            print(f"[info] --out {out}: writing {trimmed}.json/.csv/.meta.json",
+                  file=sys.stderr)
+            return trimmed
+    return out
+
+
+def ensure_parent_dir(prefix: Optional[str]) -> Optional[str]:
+    """Create the directory a path prefix writes into; say why if it cannot.
+
+    Checked BEFORE any browser starts. A `--dump-html` into a directory that
+    did not exist used to raise mid-run, after the page had been fetched, and
+    the run reported it as `navigation_failed`, exit 5 — "the content was
+    never obtained" — about content it had obtained.
+    """
+    if not prefix:
+        return None
+    parent = os.path.dirname(os.path.expanduser(prefix))
+    if not parent:
+        return None
+    try:
+        os.makedirs(parent, exist_ok=True)
+    except OSError as exc:
+        return f"cannot create {parent}: {exc.strerror or exc}"
+    if not os.access(parent, os.W_OK):
+        return f"{parent} is not writable"
+    return None
+
+
 def main(launch: Callable[[argparse.Namespace, Optional[str]], Any],
          argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
@@ -716,6 +786,17 @@ def main(launch: Callable[[argparse.Namespace, Optional[str]], Any],
         print(f"[error] {error}", file=sys.stderr)
         return EXIT_USAGE
     args.mode = mode
+
+    # Expanded once, here, so the directory created and the file written are
+    # the same path even when a `~` arrived quoted and the shell left it.
+    args.out = os.path.expanduser(output_prefix(args.out))
+    if args.dump_html:
+        args.dump_html = os.path.expanduser(args.dump_html)
+    for flag, prefix in (("--out", args.out), ("--dump-html", args.dump_html)):
+        problem = ensure_parent_dir(prefix)
+        if problem:
+            print(f"[error] {flag} {prefix}: {problem}", file=sys.stderr)
+            return EXIT_USAGE
 
     if args.concurrency > 1:
         cap = page_flow.concurrency_limit(mode, url)

@@ -260,6 +260,13 @@ many cells differ.
   it with a clean HTTP 404, and this scraper calls that `not_found` — an
   answer, not a refusal, on all three engines. Check the id before you check
   your proxy.
+* **A `--gl` Play does not serve is exit 2, not exit 3.** `--gl` must be two
+  letters; a well-formed code the store does not serve (`xx`, measured
+  2026-10-22) gets Play's own HTTP 400 page, which this scraper reports as a
+  usage error naming the flag — with no retries and no proxy advice. `ZZ`, by
+  contrast, is answered with a full page.
+* **`--out` is a prefix.** `--out data/run.json` writes `data/run.json`,
+  `data/run.csv` and `data/run.meta.json`, creating `data/` if needed.
 * **`genre_id` is null on every listing row, and that is the store.** A grid
   tile publishes the genre only as display text ("Casual", "Arcade") — it
   carries no locale-independent key at all, measured across the capture set.
