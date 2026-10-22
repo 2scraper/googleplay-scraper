@@ -98,9 +98,35 @@ discovered from a bill or a diff.
   while a previous session on the same profile closes. Other refusals —
   401, a closed port, a timeout — fail at once.
 
+- **A market in `--url` is kept.** `--gl` and `--hl` defaulted to `US` and
+  `en` and were then written over the URL, so `--url "…/search?q=vpn&hl=ja&gl=JP"`
+  fetched the US store — USD prices, English titles, rows labelled US — with
+  nothing said. The URL's own `gl`/`hl` now win over the defaults; a typed
+  flag still replaces them, and says so. Found while comparing the Scraper
+  API with Playwright: after the fix the two agreed on all 30 apps of that
+  search with no field different.
+- **The Scraper API path follows the same output contract.** It writes a
+  `.meta.json` (so `diff_runs.py` can use its output), fills `page` and
+  `position`, defaults to `--format json` like the browser engines, and
+  normalises `--out` the same way. It also pins `hl`/`gl` in the request:
+  without them Play chose the market from the API's own exit while the rows
+  were labelled with a default. The "not run against this site yet" notes
+  are replaced by what was measured.
+- `diff_runs.py` ends a refusal with advice for the actual reason — the same
+  `--gl`, the same `--mode`, re-run the incomplete side — instead of "re-run
+  the incomplete side" whatever the reason.
+- `.dockerignore` leaves out `.venv-*/`, `venv-*/` and `captures/`: with one
+  virtualenv per engine, as the README recommends, ~240 MB was sent to the
+  build. The image itself copies files by name and is unchanged.
+
 ### Changed
 
 - CI only: the canary now runs weekly (Mondays 06:17 UTC) instead of daily, and on a manual dispatch.
+- README: why `original_price` and `discount_pct` are null on every row (0
+  of 411 rows from the captures, 0 of 877 from live runs).
+- README: the Scraper API is in the engine table.
+- README: pyppeteer on Apple Silicon — its Chromium download has no arm64
+  entry; use it through `--cdp-endpoint` there, or use Playwright.
 
 ## [0.2.0] — 2026-10-15
 

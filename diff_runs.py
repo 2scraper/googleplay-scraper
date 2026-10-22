@@ -223,9 +223,9 @@ def _print_summary(result: dict) -> None:
 def _run_status(path: str) -> Tuple[Optional[str], Optional[dict]]:
     """Read the `<out>.meta.json` sidecar beside a run's JSON output.
 
-    Returns (status, meta), or (None, None) when there is no sidecar — which
-    is the normal case for output written before run metadata existed, or by
-    `scraper_api_client.py` (single fetch, no pagination to cut short).
+    Returns (status, meta), or (None, None) when there is no sidecar — the
+    case for output written before run metadata existed. Every engine
+    writes one now, `scraper_api_client.py` included.
     """
     meta_path = re.sub(r"\.json$", "", path) + ".meta.json"
     try:
@@ -247,6 +247,16 @@ def _check_comparable(args) -> bool:
     this is a refusal with a --force escape hatch rather than a hard error.
     """
     problems = []
+    # What would make the two runs comparable, one line per KIND of problem,
+    # in the order found. The closing advice used to be "re-run the
+    # incomplete side" whatever the reason, which is wrong for two complete
+    # runs of different markets and for a reviews run.
+    advice = []
+
+    def advise(line):
+        if line not in advice:
+            advice.append(line)
+
     modes = {}
     for label, path in (("--old", args.old), ("--new", args.new)):
         status, meta = _run_status(path)
@@ -265,16 +275,20 @@ def _check_comparable(args) -> bool:
                 f"{label} ({path}) is a {mode!r} run, which is not one row "
                 f"per sku. This tool diffs one row per sku on price, so there "
                 f"is nothing here it can compare.")
+            advise("compare reviews runs on review_id yourself; this tool "
+                   "diffs app rows")
         if status != "complete":
             problems.append(
                 f"{label} ({path}) was a {status!r} run — stopped after "
                 f"{meta.get('pages_completed')} of {meta.get('pages_requested')} "
                 f"page(s), reason {meta.get('stop_reason')!r}")
+            advise("re-run the incomplete side")
     if len(set(modes.values())) > 1:
         problems.append(
             f"the two runs are different modes ({modes}). A listing row and a "
             f"detail row carry different fields, so `added`/`removed` would "
             f"describe the mode change rather than the catalogue.")
+        advise("diff two runs of the same --mode")
 
     # A CURRENCY MISMATCH. Google Play prices per market: the README's
     # table shows one app quoted in USD, EUR, JPY, INR and BRL from one
@@ -296,6 +310,7 @@ def _check_comparable(args) -> bool:
                 f"{label} ({path}) holds more than one currency ({sorted(seen)}) "
                 f"— that run was redirected mid-way and its own prices are not "
                 f"comparable with each other, let alone with another run's.")
+            advise("re-run that side")
     if len(set(currencies.values())) > 1:
         problems.append(
             f"the two runs quote different currencies ({currencies}). "
@@ -303,6 +318,7 @@ def _check_comparable(args) -> bool:
             f"of different --gl values, and their prices and ratings are not "
             f"comparable. Diff two runs of the same --gl. `source` cannot "
             f"catch it: it is 'play.google.com' on both sides.")
+        advise("diff two runs of the same --gl")
 
     # A MARKET mismatch, read from the rows' own `gl`. The currency above
     # cannot tell two markets that share one apart — DE and FR are both EUR —
@@ -323,6 +339,7 @@ def _check_comparable(args) -> bool:
             f"the two runs describe different markets ({markets}). Ratings and "
             f"prices are per --gl, so every difference would be the market "
             f"rather than the store moving. Diff two runs of the same --gl.")
+        advise("diff two runs of the same --gl")
 
     if not problems:
         return True
@@ -334,9 +351,9 @@ def _check_comparable(args) -> bool:
     print("[!] Refusing to diff these two runs:")
     for line in problems:
         print(f"      {line}")
-    print("    Re-run the incomplete side, or pass --force to compare anyway "
-          "(added/removed will include products that were simply never "
-          "fetched).")
+    print("    To compare them: " + "; ".join(advice) + ".")
+    print("    --force compares anyway, and then the differences describe the "
+          "mismatch above rather than the store.")
     return False
 
 

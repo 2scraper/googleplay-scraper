@@ -48,6 +48,7 @@ import os
 import re
 import sys
 import time
+import urllib.parse
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import captcha_solver
@@ -127,11 +128,14 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--query", help="a search query (--mode search)")
     ap.add_argument("--app-id", help="an Android package id, e.g. com.whatsapp")
     ap.add_argument("--developer", help="a developer id or name")
-    ap.add_argument("--gl", default="US", type=country_code,
+    ap.add_argument("--gl", default=None, type=country_code,
                     help="the MARKET, as a two-letter country code. Changes "
                          "the rating, the currency and which apps are listed. "
-                         "A code Play does not serve is exit 2. Default US.")
-    ap.add_argument("--hl", default="en", help="the display language. Default en.")
+                         "A code Play does not serve is exit 2. Default: "
+                         "the gl in --url, else US.")
+    ap.add_argument("--hl", default=None,
+                    help="the display language. Default: the hl in --url, "
+                         "else en.")
     ap.add_argument("--pages", type=positive_int, default=1,
                     help="how many fetches to make. On a grid this follows "
                          "the page's own shelves; on reviews it follows the "
@@ -205,12 +209,42 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+DEFAULT_HL, DEFAULT_GL = "en", "US"
+
+
+def _settle_market(args: argparse.Namespace) -> None:
+    """The market of a `--url` run: the URL's own, unless a flag was typed.
+
+    `--gl` and `--hl` used to DEFAULT to US and en and were then written over
+    the URL, so `--url ".../search?q=vpn&hl=ja&gl=JP"` was fetched as
+    `hl=en&gl=US` — measured 2026-10-22: USD prices and English titles, rows
+    labelled US — with nothing said. A market in the URL is something the
+    caller typed and outranks a default. A flag the caller typed outranks the
+    URL, and says so.
+    """
+    query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(args.url).query))
+    for flag, attr, default in (("--gl", "gl", DEFAULT_GL), ("--hl", "hl", DEFAULT_HL)):
+        in_url = query.get(attr)
+        if attr == "gl" and in_url:
+            in_url = in_url.upper()
+        typed = getattr(args, attr)
+        if typed and in_url and typed != in_url:
+            print(f"[info] {flag} {typed} replaces {attr}={in_url} in --url",
+                  file=sys.stderr)
+        setattr(args, attr, typed or in_url or default)
+
+
 def resolve_target(args: argparse.Namespace) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    """`(mode, url, error)` — what this invocation is actually asking for."""
+    """`(mode, url, error)` — what this invocation is actually asking for.
+
+    Also settles the MARKET, and writes it back to `args.gl` / `args.hl` so the
+    request, the rows and every message agree on it.
+    """
     if args.url:
         reason = parser.refusal_reason(args.url)
         if reason:
             return None, None, reason
+        _settle_market(args)
         mode = parser.mode_for_url(args.url)
         # An app page is the address of BOTH app-level modes: `--mode app`
         # reads the page, `--mode reviews` pages that app's reviews. Refusing
@@ -226,6 +260,7 @@ def resolve_target(args: argparse.Namespace) -> Tuple[Optional[str], Optional[st
                 f"{mode} URL")
         return mode, parser.with_market(args.url, args.hl, args.gl), None
 
+    args.hl, args.gl = args.hl or DEFAULT_HL, args.gl or DEFAULT_GL
     if args.mode == "listing":
         if not args.category:
             return None, None, "--mode listing needs --category (e.g. GAME) or --url"

@@ -1513,7 +1513,11 @@ def parse_products(markup: str, url: str = "", category: Optional[str] = None,
     """
     mode = mode_for_url(url) if url else None
     if mode == "app":
-        row = parse_detail(markup, package_from_url(url), hl=hl, gl=gl, page=page)
+        # Position 1, as the browser engines' app run gives it: one page is
+        # one app. Left unset here, an app row from the Scraper API came back
+        # with `position` null beside the same row's `page` 1.
+        row = parse_detail(markup, package_from_url(url), hl=hl, gl=gl, page=page,
+                           position=1 if page is not None else None)
         rows = [row] if row is not None else []
     else:
         rows = parse_grid(markup, hl=hl, gl=gl, page=page)
