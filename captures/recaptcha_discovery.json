@@ -1,0 +1,125 @@
+{
+  "_about": "What RECAPTCHA_DISCOVERY_JS returned on Google's own reCAPTCHA demo pages, 2026-10-22, in headless Chromium. The demo sitekeys are replaced by the placeholder 'demo-sitekey'; where the loader's render parameter equalled the sitekey, it still does, which is the only property the classifier reads.",
+  "pages": [
+    {
+      "name": "v2 checkbox, implicit render",
+      "url": "https://www.google.com/recaptcha/api2/demo",
+      "expected_kind": "recaptcha_v2",
+      "discovery": {
+        "found": true,
+        "sitekey": "demo-sitekey",
+        "size": null,
+        "action": null,
+        "enterprise": false,
+        "containerId": "recaptcha-demo-form",
+        "hints": [
+          "sitekey from ___grecaptcha_cfg"
+        ],
+        "badge": false,
+        "challengeFrame": true,
+        "scripts": [
+          "https://www.gstatic.com/recaptcha/releases/NhfdZHzre16wrc2m6BxEdu7J/recaptcha__en.js",
+          "/recaptcha/api.js"
+        ],
+        "renderParam": null,
+        "loaderSeen": true
+      }
+    },
+    {
+      "name": "v2 invisible, implicit render",
+      "url": "https://www.google.com/recaptcha/api2/demo?invisible=true",
+      "expected_kind": "recaptcha_v2_invisible",
+      "discovery": {
+        "found": true,
+        "sitekey": "demo-sitekey",
+        "size": null,
+        "action": null,
+        "enterprise": false,
+        "containerId": "recaptcha-demo-form",
+        "hints": [
+          "sitekey from ___grecaptcha_cfg"
+        ],
+        "badge": true,
+        "challengeFrame": true,
+        "scripts": [
+          "https://www.gstatic.com/recaptcha/releases/4EDjxXf4knsx6UBM1L2V6cv8/recaptcha__en.js",
+          "/recaptcha/api.js"
+        ],
+        "renderParam": null,
+        "loaderSeen": true
+      }
+    },
+    {
+      "name": "v2 invisible, implicit render (second demo)",
+      "url": "https://recaptcha-demo.appspot.com/recaptcha-v2-invisible.php",
+      "expected_kind": "recaptcha_v2_invisible",
+      "discovery": {
+        "found": true,
+        "sitekey": "demo-sitekey",
+        "size": null,
+        "action": null,
+        "enterprise": false,
+        "containerId": "g-recaptcha-response",
+        "hints": [
+          "sitekey from ___grecaptcha_cfg"
+        ],
+        "badge": true,
+        "challengeFrame": true,
+        "scripts": [
+          "https://www.gstatic.com/recaptcha/releases/4EDjxXf4knsx6UBM1L2V6cv8/recaptcha__en.js",
+          "https://www.google.com/recaptcha/api.js"
+        ],
+        "renderParam": null,
+        "loaderSeen": true
+      }
+    },
+    {
+      "name": "v2 checkbox, render=explicit",
+      "url": "https://recaptcha-demo.appspot.com/recaptcha-v2-checkbox-explicit.php",
+      "expected_kind": "recaptcha_v2",
+      "discovery": {
+        "found": true,
+        "sitekey": "demo-sitekey",
+        "size": null,
+        "action": null,
+        "enterprise": false,
+        "containerId": "g-recaptcha-response",
+        "hints": [
+          "sitekey from ___grecaptcha_cfg"
+        ],
+        "badge": false,
+        "challengeFrame": true,
+        "scripts": [
+          "https://www.gstatic.com/recaptcha/releases/4EDjxXf4knsx6UBM1L2V6cv8/recaptcha__en.js",
+          "https://www.google.com/recaptcha/api.js"
+        ],
+        "renderParam": "explicit",
+        "loaderSeen": true
+      }
+    },
+    {
+      "name": "v3, render=<sitekey>",
+      "url": "https://recaptcha-demo.appspot.com/recaptcha-v3-request-scores.php",
+      "expected_kind": "recaptcha_v3",
+      "discovery": {
+        "found": true,
+        "sitekey": "demo-sitekey",
+        "size": "invisible",
+        "action": null,
+        "enterprise": false,
+        "containerId": "recaptcha-steps",
+        "hints": [
+          "sitekey from ___grecaptcha_cfg"
+        ],
+        "badge": true,
+        "challengeFrame": false,
+        "scripts": [
+          "https://www.gstatic.com/recaptcha/releases/NhfdZHzre16wrc2m6BxEdu7J/recaptcha__en.js",
+          "https://www.google.com/recaptcha/api.js"
+        ],
+        "renderParam": "demo-sitekey",
+        "loaderSeen": true
+      }
+    }
+  ]
+}

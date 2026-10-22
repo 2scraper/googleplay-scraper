@@ -214,9 +214,15 @@ def detect_recaptcha_v3(html: str, page_url: str) -> Optional[CaptchaChallenge]:
             page_url=page_url,
         )
 
+    # `grecaptcha.render` is v2's explicit-render call; v3 is driven by
+    # `grecaptcha.execute(key, {action})` above. Measured 2026-10-22 on
+    # Google's own demos: the v2 explicit page calls render and never execute,
+    # the v3 page calls execute and never render. This branch used to label
+    # the v2 call as v3, which `reconcile_detections` would only override
+    # when the live detector also found something.
     key_match = re.search(r"data-sitekey=['\"]([\w-]{20,})['\"]", html)
     if key_match and "grecaptcha.render" in html:
-        return CaptchaChallenge(kind="recaptcha_v3", sitekey=key_match.group(1), page_url=page_url)
+        return CaptchaChallenge(kind="recaptcha_v2", sitekey=key_match.group(1), page_url=page_url)
 
     return None
 
@@ -335,6 +341,13 @@ RECAPTCHA_DISCOVERY_JS = r"""
       const m = /[?&]render=([^&]+)/.exec(sc.getAttribute('src') || '');
       if (m) { out.renderParam = decodeURIComponent(m[1]); break; }
     }
+    // Whether the LOADER itself is on the page. "No render parameter" only
+    // means something when the script that would carry one was seen: the
+    // release bundle (recaptcha__en.js) never carries it, and a page whose
+    // loader went missing must fall back rather than read as implicit v2.
+    out.loaderSeen = [...document.querySelectorAll('script[src*="recaptcha"]')]
+      .some(sc => /\/recaptcha\/(?:api|enterprise)\.js(?:[?#]|$)/
+                    .test(sc.getAttribute('src') || ''));
   } catch (e) { out.hints.push('context scan failed: ' + e.message); }
 
   return out;
@@ -350,15 +363,26 @@ def detect_recaptcha_in_page(evaluate, page_url: str = "") -> Optional[CaptchaCh
     `driver.execute_script` under Selenium (wrap it so the arrow function is
     invoked), or an awaited `page.evaluate` under pyppeteer.
 
-    Version inference, and why it is deliberately conservative:
-      * `size == "invisible"` PLUS an interactive bframe iframe present is
-        the signature of **v2-invisible**, not v3 — v3 never renders a
-        challenge frame. This is what that site looked like as of
-        2026-08-24, on the same sitekey that its old markup explicitly
-        labelled `data-version="v3"`.
-      * `size == "invisible"` with no challenge frame is treated as v3,
-        which is v3's normal appearance (badge only).
-      * a `normal`/`compact` size is a v2 checkbox.
+    Version inference, strongest signal first:
+      * `render=<the sitekey>` on the loader is v3, and nothing else is: v3
+        cannot be loaded without it.
+      * `render=explicit` is v2 — invisible when the client says so.
+      * a loader with NO `render` parameter is v2 rendered implicitly from a
+        `.g-recaptcha` element, for the same reason v3 is excluded above.
+        Then the badge decides: v2-invisible draws `.grecaptcha-badge`, a v2
+        checkbox never does. (v3 draws the badge too — which is why the badge
+        is only consulted AFTER v3 has been ruled out by the missing render.)
+      * only when the loader was not seen: `normal`/`compact` size is a v2
+        checkbox, `invisible` plus a challenge frame is v2-invisible, and the
+        rest is treated as v3.
+
+    Measured 2026-10-22 in a real browser. Google's v2 checkbox demo and its
+    invisible demo both load `/recaptcha/api.js` with no `render` at all, and
+    both used to come out as v3 — the "neither size nor render" case fell
+    through to the last branch — so a solve would have been bought as a v3
+    task for a v2 widget. Google's v3 demo loads `api.js?render=<key>`. Note
+    that a challenge frame was present on every v2 page measured, checkbox
+    included, so it does not separate checkbox from invisible.
     When the two signals disagree the ambiguity is recorded in the returned
     challenge's `kind` and in the log, rather than silently guessing — pick
     the wrong one and 2captcha returns a token the site rejects.
@@ -391,6 +415,9 @@ def detect_recaptcha_in_page(evaluate, page_url: str = "") -> Optional[CaptchaCh
         kind = "recaptcha_v3"
     elif render == "explicit":
         kind = "recaptcha_v2_invisible" if size == "invisible" else "recaptcha_v2"
+    elif info.get("loaderSeen") and not render:
+        kind = ("recaptcha_v2_invisible"
+                if size == "invisible" or info.get("badge") else "recaptcha_v2")
     elif size in ("normal", "compact"):
         kind = "recaptcha_v2"
     elif info.get("challengeFrame") and size == "invisible":

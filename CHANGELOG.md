@@ -45,6 +45,17 @@ discovered from a bill or a diff.
   pages passed by accident: 20 embedded reviews plus the 80 a tokenless page
   2 left after dedupe.
 
+- **reCAPTCHA v2 is no longer bought as v3.** A widget rendered from a
+  `.g-recaptcha` element loads `api.js` with no `render` parameter, and both
+  the checkbox and the invisible form of it were classified as v3 — so a
+  solve was bought for the wrong task type and refused. v3 cannot load
+  without `render=<sitekey>`, so a loader without one is now v2, and the
+  badge then tells invisible from checkbox (only after v3 is ruled out, since
+  v3 draws the badge too). The HTML-only detector labelled the explicit-render
+  call `grecaptcha.render` as v3 as well; it is v2's call and is now read as
+  v2. Measured 2026-10-22 on Google's own demos in Playwright, Selenium and
+  pyppeteer; with the corrected kind both v2 demos were solved and accepted.
+
 ### Changed
 
 - CI only: the canary now runs weekly (Mondays 06:17 UTC) instead of daily, and on a manual dispatch.

@@ -25,6 +25,7 @@ reads it; the earlier pair was in relevance order.
 | `notfound.html` | a package id that does not exist | HTTP 404, and the control for the asset-count signal |
 | `reviews_p1.txt` | `batchexecute` RPC `UsvDTd`, `--sort newest` | 40 reviews, newest first, and a continuation token |
 | `reviews_p2.txt` | the same, with that token | 40 more, sharing none of page 1's ids and continuing the date order |
+| `recaptcha_discovery.json` | Google's reCAPTCHA demo pages, not Play | what the live discovery script returned for v2, v2-invisible and v3 widgets; sitekeys replaced by `demo-sitekey` |
 
 ## What is NOT verbatim
 
