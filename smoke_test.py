@@ -418,20 +418,70 @@ def test_request_builder_matches_what_the_store_answers():
     form = parser.build_reviews_request("com.whatsapp", 40, None, "newest")
     ok &= check("[req] one form field", list(form) == ["f.req"], str(list(form)))
     ok &= check("[req] the RPC id", '"UsvDTd"' in form["f.req"])
-    ok &= check("[req] sort key 2 — the only one that returns anything",
-                "[2,null,[40,null,null]" in form["f.req"], form["f.req"])
+    # The sort key is the SECOND slot of the sort block, after a constant 2.
+    # Up to 0.2.0 this check pinned the key in the FIRST slot, which the
+    # store reads as "relevance" for 2 and answers with nothing for 1 and 3 —
+    # so the suite was defending the bug that made `--sort` do nothing.
+    for name, key in (("relevant", 1), ("newest", 2), ("rating", 3)):
+        inner = json.loads(json.loads(
+            parser.build_reviews_request("com.whatsapp", 40, None, name)
+            ["f.req"])[0][0][1])
+        ok &= check(f"[req] --sort {name} sends key {key} in the second slot",
+                    inner[2] == [2, key, [40, None, None], None, []],
+                    str(inner[2]))
     ok &= check("[req] the app id and Play's type tag",
                 '[\\"com.whatsapp\\",7]' in form["f.req"], form["f.req"])
     # Measured: asking for score 1 and score 5 each returned forty reviews
     # spanning all five. A filter that changes nothing must not be offered.
-    ok &= check("[req] no score filter is sent",
-                "score_filter" not in str(parser.build_reviews_request.__doc__ or "")
-                or "does NOTHING" in (parser.build_reviews_request.__doc__ or ""))
-    ok &= check("[req] only the measured sort is offered",
-                set(parser.REVIEW_SORTS) == {"newest"}, str(parser.REVIEW_SORTS))
+    newest = json.loads(json.loads(form["f.req"])[0][0][1])
+    ok &= check("[req] no score filter is sent (none is implemented)",
+                newest[2][3] is None, str(newest[2]))
+    ok &= check("[req] all three of the store's orderings are offered",
+                parser.REVIEW_SORTS == {"relevant": 1, "newest": 2, "rating": 3},
+                str(parser.REVIEW_SORTS))
+    ok &= check("[req] the default ordering is newest",
+                parser.DEFAULT_REVIEW_SORT == "newest")
+    try:
+        parser.build_reviews_request("com.whatsapp", 40, None, "oldest")
+        ok &= check("[req] an unknown sort is refused, not silently replaced",
+                    False, "no error raised")
+    except ValueError:
+        pass
     with_token = parser.build_reviews_request("com.whatsapp", 40, "TOKEN", "newest")
     ok &= check("[req] a token goes into the pagination slot",
                 "[40,null,\\\"TOKEN\\\"]" in with_token["f.req"], with_token["f.req"])
+    return ok
+
+
+def test_newest_reviews_are_newest_first():
+    """`--sort newest` must come back newest first, and stay so over a page.
+
+    The captures are taken by `make_fixtures.py` through
+    `build_reviews_request(..., "newest")`, page 2 with page 1's token, so
+    they are exactly what this repository asks the store for. Up to 0.2.0 that
+    request put the sort key in the wrong slot and the store answered in
+    relevance order: dates like 08-28, 08-31, 09-18, 07-26 — which no check
+    looked at, because every check counted rows.
+    """
+    ok = True
+    pages = []
+    for name in ("reviews_p1.txt", "reviews_p2.txt"):
+        path = os.path.join(HERE, "captures", name)
+        if not os.path.exists(path):
+            skip("newest-order", f"captures/{name} absent")
+            return True
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            records, token = parser.reviews_from_payload(
+                parser.parse_batchexecute(fh.read()))
+        pages.append([parser.parse_review_record(r, "com.whatsapp")
+                      for r in records])
+    dates = [r.posted_at for page in pages for r in page]
+    ok &= check("[order] both pages carry rows", all(pages), str([len(p) for p in pages]))
+    ok &= check("[order] newest is non-increasing within AND across pages",
+                all(dates[i] >= dates[i + 1] for i in range(len(dates) - 1)),
+                str(dates[:6]))
+    ok &= check("[order] page 2 continues rather than restarts",
+                not ({r.review_id for r in pages[0]} & {r.review_id for r in pages[1]}))
     return ok
 
 
@@ -1222,6 +1272,7 @@ class _FakeDriver:
         return True
 
     def post_form(self, url, form):
+        self.world["forms"].append(form)
         step = self.world["posts"].pop(0)
         if isinstance(step, BaseException):
             raise step
@@ -1238,7 +1289,7 @@ def _run_main(argv, pages, posts=(), discovery=None, after_solve=None,
               launch_error=None, env=None):
     """`(rc, world, out_prefix_files)` for one `engine_core.main` run."""
     import engine_core
-    world = {"pages": list(pages), "posts": list(posts), "fetches": [],
+    world = {"pages": list(pages), "posts": list(posts), "forms": [], "fetches": [],
              "launches": [], "closed": 0, "injected": [], "current": None,
              "discovery": discovery, "after_solve": after_solve}
 
@@ -1399,17 +1450,92 @@ def test_run_contract_reviews_refusal_is_not_an_end():
     if app is None:
         skip("run-contract", "captures/app_free_us.html absent")
         return True
+    page1 = _review_capture("reviews_p1.txt")
+    if page1 is None:
+        skip("run-contract", "captures/reviews_p1.txt absent")
+        return True
     args = ["--mode", "reviews", "--app-id", "com.whatsapp", "--pages", "3"]
     for label, post in (
             ("a refusal body", (_BLOCKED_PAGE, 429)),
             ("an empty body", ("", 200))):
-        rc, world, files = _run_main(args, [(app, 200)], posts=[post])
+        rc, world, files = _run_main(args, [(app, 200)],
+                                     posts=[(page1, 200), post])
         meta = json.loads(files.get(".meta.json", "{}"))
         ok &= check(f"[contract] reviews: {label} on page 2 is exit 6",
                     rc == 6, f"rc={rc} {meta.get('stop_reason')}")
         ok &= check(f"[contract] reviews: {label} keeps page 1's rows",
                     meta.get("status") == "partial" and meta.get("products", 0) > 0,
                     str(meta))
+    return ok
+
+
+def _review_capture(name):
+    path = os.path.join(HERE, "captures", name)
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        return fh.read()
+
+
+def _sent(form):
+    """The sort block a posted form carried: `[2, sort, [n, null, token], …]`."""
+    return json.loads(json.loads(form["f.req"])[0][0][1])[2]
+
+
+def test_run_contract_reviews_pages_chain_on_the_token():
+    """Page N+1 is asked for WITH page N's token, and every page is sorted.
+
+    The defect this pins: up to 0.2.0 page 1 came from the reviews embedded in
+    the app page — relevance-ordered, no token — so page 2 went out with no
+    token at all, came back as the start of the list, and dedupe ate it. One
+    reported run gave 20 / 1 / 19 rows over three pages.
+    """
+    ok = True
+    app = capture("app_free_us.html")
+    p1, p2 = _review_capture("reviews_p1.txt"), _review_capture("reviews_p2.txt")
+    if None in (app, p1, p2):
+        skip("run-contract", "app and both review captures needed")
+        return True
+    token1 = parser.reviews_from_payload(parser.parse_batchexecute(p1))[1]
+
+    rc, world, files = _run_main(
+        ["--mode", "reviews", "--app-id", "com.whatsapp", "--pages", "2",
+         "--reviews-per-call", "40"],
+        [(app, 200)], posts=[(p1, 200), (p2, 200)])
+    forms = world["forms"]
+    ok &= check("[reviews] two pages means two POSTs", len(forms) == 2, str(len(forms)))
+    if len(forms) == 2:
+        ok &= check("[reviews] page 1 asks for the start of the list",
+                    _sent(forms[0])[2][2] is None, str(_sent(forms[0])))
+        ok &= check("[reviews] page 2 carries page 1's continuation token",
+                    _sent(forms[1])[2][2] == token1 and token1,
+                    str(_sent(forms[1])[2][2])[:40])
+        ok &= check("[reviews] every page asks for newest",
+                    all(_sent(f)[:2] == [2, 2] for f in forms))
+    rows = json.loads(files.get(".json", "[]"))
+    ok &= check("[reviews] two full pages of rows, nothing eaten by dedupe",
+                len(rows) == 80, str(len(rows)))
+    ok &= check("[reviews] 40 rows on each page",
+                [sum(1 for r in rows if r["page"] == n) for n in (1, 2)] == [40, 40])
+    dates = [r["posted_at"] for r in rows]
+    ok &= check("[reviews] the run's rows are newest first end to end",
+                all(dates[i] >= dates[i + 1] for i in range(len(dates) - 1)))
+    ok &= check("[reviews] the run completes", rc == 0, f"rc={rc}")
+
+    # The ordering flag reaches the wire.
+    rc, world, _ = _run_main(
+        ["--mode", "reviews", "--app-id", "com.whatsapp", "--pages", "1",
+         "--sort", "rating"], [(app, 200)], posts=[(p1, 200)])
+    ok &= check("[reviews] --sort rating sends key 3",
+                world["forms"] and _sent(world["forms"][0])[:2] == [2, 3],
+                str(world["forms"] and _sent(world["forms"][0])))
+
+    # An app page URL is the address of `--mode reviews` too.
+    rc, world, _ = _run_main(
+        ["--url", "https://play.google.com/store/apps/details?id=com.whatsapp",
+         "--mode", "reviews", "--pages", "1"], [(app, 200)], posts=[(p1, 200)])
+    ok &= check("[reviews] --url <app page> --mode reviews runs reviews",
+                rc == 0 and len(world["forms"]) == 1, f"rc={rc}")
     return ok
 
 
@@ -1721,6 +1847,7 @@ def main():
         test_markers_score_zero_on_good_pages,
         test_reviews_one_parser_two_routes,
         test_request_builder_matches_what_the_store_answers,
+        test_newest_reviews_are_newest_first,
         test_fixtures_carry_no_real_reviewers,
         test_banned_wording,
         test_engines_share_the_cli_and_the_loops,
@@ -1743,6 +1870,7 @@ def main():
         test_run_contract_proxy_and_partial_rows,
         test_run_contract_exit_codes_per_state,
         test_run_contract_reviews_refusal_is_not_an_end,
+        test_run_contract_reviews_pages_chain_on_the_token,
         test_run_contract_captcha_budget,
         test_cli_rejects_counts_that_cannot_run,
         test_env_url_does_not_override_a_typed_builder_flag,

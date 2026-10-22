@@ -68,13 +68,18 @@ HTTP 302 to itself, forever.
 
 Reviews come from one structure reached two ways
 ------------------------------------------------
-The first page of an app's reviews is embedded in the app page's own payload.
-Every page after it comes from `/_/PlayStoreUi/data/batchexecute`, RPC
-`UsvDTd`, which answers a plain POST from a datacentre address with no
-cookies and no key. Page 2 shares none of page 1's ids and every page carries
-a continuation token, so the mode is bounded by `--pages` rather than by the
-store. Both routes are the same 17-slot record, so `parse_review_record()`
-serves both and they cannot drift.
+Every page of `--mode reviews` comes from `/_/PlayStoreUi/data/batchexecute`,
+RPC `UsvDTd`, which answers a plain POST from a datacentre address with no
+cookies and no key. Each response carries a continuation token, and the next
+page is asked for WITH it — page 2 shares none of page 1's ids — so the mode
+is bounded by `--pages` rather than by the store.
+
+The app page also embeds a first handful of reviews in its own payload, in
+the same 17-slot record. They are NOT page 1 of a reviews run, though they
+look like it: they come in the store's "most relevant" order whatever
+`--sort` asks for, and they carry no continuation token, so a run that
+started from them asked for page 2 without one and got the start of the list
+again. `parse_review_record()` still reads both, so the two cannot drift.
 """
 
 import html as _html
@@ -1139,20 +1144,31 @@ BATCHEXECUTE_PATH = "/_/PlayStoreUi/data/batchexecute"
 # to fail cheaply; `--reviews-per-call` raises it.
 REVIEWS_PER_CALL = 200
 
-# Play's sort key. There is exactly ONE, and that is a measurement rather
-# than a design decision: the store's front end distinguishes "most
-# relevant" (1), "newest" (2) and "rating" (3), and in THIS request shape
-# only 2 returns anything at all. Measured 2026-09-22 on two apps, 40
-# requested each: sort 1 -> 0 reviews and no token, sort 2 -> 40 and a token,
-# sort 3 -> 0 and no token.
+# Play's sort keys, as its own front end sends them. All three work.
 #
-# So this repo does not implement the other two orderings. That is a TODO
-# about this request shape, not a limitation of the store — the front end
-# plainly gets them — and the flag offers only what was measured to work,
-# because a `--sort` with three values of which two silently return an empty
-# run is worse than a flag with one.
-REVIEW_SORTS = {"newest": 2}
+# The key goes in the SECOND slot of the sort block, after a constant 2 the
+# front end sends on every request: `[2, <sort>, [count, null, token], null,
+# []]`. Measured 2026-10-22 on com.whatsapp, 20 asked for each:
+#
+#     sort 1  relevant   20 reviews, the store's relevance order
+#     sort 2  newest     20 reviews, posted_at strictly descending
+#     sort 3  rating     20 reviews, grouped by score
+#
+# and `newest` stays in order ACROSS a continuation token: 40 + 40 reviews,
+# no id shared, dates non-increasing over the page boundary.
+#
+# Up to 0.2.0 the key was sent in the FIRST slot. Sort 2 there still returned
+# rows — in relevance order — and sorts 1 and 3 returned nothing at all, which
+# was written up as "the store only answers newest". It was a measurement of
+# the wrong request, not of the store; the correction is the reason for the
+# table above.
+REVIEW_SORTS = {"relevant": 1, "newest": 2, "rating": 3}
 DEFAULT_REVIEW_SORT = "newest"
+
+# The constant the front end sends ahead of the sort key. Named so the shape
+# above is readable at the call site; its meaning is not documented anywhere
+# and nothing here depends on knowing it.
+_SORT_BLOCK_HEAD = 2
 
 # Where each column sits in a review record. Identical in both routes,
 # because they are the same structure.
@@ -1175,16 +1191,21 @@ def build_reviews_request(package_id: str, count: int = REVIEWS_PER_CALL,
     Returned as a dict for the caller to urlencode, so no engine has to know
     the wire format and every engine sends the identical thing.
 
-    There is deliberately no score filter. The slot for one exists in the
-    payload and setting it does NOTHING: measured 2026-09-22, asking for
-    score 1 and score 5 each returned forty reviews spanning all five scores.
-    Shipping a `--min-score`-style filter here would be shipping a flag that
-    reports success and changes no row.
+    This repository does not implement a score filter. The store's front end
+    offers one; the forms tried in the sort block's fourth slot (2026-10-22,
+    correct shape) either changed nothing or returned no rows, so no flag is
+    offered until a form is measured to filter.
+
+    `token` is the continuation token from the PREVIOUS response. Leaving it
+    None asks for the start of the list, which is right for page 1 and wrong
+    for every page after it.
     """
-    sort_key = REVIEW_SORTS.get(sort, REVIEW_SORTS[DEFAULT_REVIEW_SORT])
+    if sort not in REVIEW_SORTS:
+        raise ValueError(f"unknown review sort {sort!r}; "
+                         f"expected one of {sorted(REVIEW_SORTS)}")
     pagination = [count, None, token]
     inner = [None, None,
-             [sort_key, None, pagination, None, []],
+             [_SORT_BLOCK_HEAD, REVIEW_SORTS[sort], pagination, None, []],
              [package_id, 7]]
     payload = [[[REVIEWS_RPC, json.dumps(inner, separators=(",", ":")),
                  None, "generic"]]]
@@ -1240,11 +1261,11 @@ def reviews_from_payload(payload: Any) -> Tuple[List[list], Optional[str]]:
 
 
 def embedded_reviews(markup: str) -> List[list]:
-    """The first page of reviews, which the app page carries in its own payload.
+    """The handful of reviews the app page carries in its own payload.
 
-    So `--mode app` gets reviews without a second request, and `--mode
-    reviews` starts from the same structure it will then page through. One
-    parser for both is what keeps the two routes from drifting.
+    Read to confirm an app page was served with its reviews block, not as
+    page 1 of `--mode reviews`: these are in relevance order whatever `--sort`
+    says and carry no continuation token (see the module docstring).
     """
     out: List[list] = []
     for _key, data in iter_data_blocks(markup):

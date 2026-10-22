@@ -168,16 +168,28 @@ capped there. Measured 2026-09-22 on one app: **100 → 100, 200 → 200,
 continuation token. No ceiling was found. The default here is 200;
 `--reviews-per-call` raises it.
 
-Page 1 costs no extra request at all — the app page already embeds it.
+Every page comes from that endpoint, page 2 onward asked for with the
+previous page's continuation token. The app page is still fetched first —
+to confirm the app exists in that market, which Play answers with a clean
+404 when it does not — but its own embedded handful of reviews is not used
+as page 1: those come in relevance order whatever `--sort` says and carry no
+token to continue from.
 
-Only `--sort newest` is implemented. The store's front end also offers "most
-relevant" and "rating", and in this request shape both return an empty
-payload: measured on two apps, sort key 1 → 0 reviews, key 2 → 40 and a
-token, key 3 → 0. That is a TODO about this request shape, not a limit of the
-store, and the flag offers only what was measured to work. There is likewise
-no score filter: the payload has a slot for one and setting it changes
-nothing (asking for score 1 and for score 5 each returned forty reviews
-spanning all five).
+`--sort` takes the store's three orderings:
+
+| `--sort` | what comes back |
+|---|---|
+| `newest` (default) | posted date descending, kept across pages |
+| `relevant` | the store's own ranking |
+| `rating` | grouped by score |
+
+Measured 2026-10-22 on `com.whatsapp`: `newest` returned two pages of 40
+with no review shared between them and `posted_at` non-increasing across the
+page boundary; `relevant` and `rating` each returned their own ordering.
+
+This repository does not implement a score filter. The store's front end has
+one; the request forms tried so far either changed nothing or returned no
+rows, so no flag is offered until one is measured to filter.
 
 **Reviews are about identifiable people.** Play publishes a reviewer's
 display name, avatar and a stable 21-digit profile id beside their words.
