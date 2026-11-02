@@ -1,4 +1,4 @@
-# googleplay-scraper
+# Google Play Scraper — Apps, Ratings and Reviews in Python
 
 [![release](https://img.shields.io/github/v/release/2scraper/googleplay-scraper?sort=semver)](https://github.com/2scraper/googleplay-scraper/releases)
 [![tests](https://github.com/2scraper/googleplay-scraper/actions/workflows/tests.yml/badge.svg)](https://github.com/2scraper/googleplay-scraper/actions/workflows/tests.yml)
@@ -7,6 +7,8 @@
 [![licence](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
 [![engines](https://img.shields.io/badge/engines-Playwright%20%7C%20Selenium%20%7C%20pyppeteer%20%7C%20CDP-informational)](#engines)
 [![runs without an account](https://img.shields.io/badge/runs%20without-an%20account-brightgreen)](#do-you-need-any-of-the-paid-products)
+
+**Google Play scraper** — an open-source (MIT) Python tool that reads Google Play app listings, keyword search, full app pages, developer catalogues and review histories, and writes installs, rating histograms, in-app-purchase ranges and per-market pricing to JSON or CSV. It needs no key, no proxy and no account: measured on 2026-09-22 from a datacentre address with plain `curl`, every route it reads answered in full. Use it for app-market research and review analysis — the rating is computed per country, so pick the market with `--gl`.
 
 Scrapes [Google Play](https://play.google.com) to JSON or CSV: app listings,
 keyword search, full app pages, a developer's catalogue and unbounded review
@@ -312,6 +314,24 @@ pytest                          # the same checks, wrapped
 The fixtures are cut from the real captures in `captures/`, and the checks
 pin **values** rather than coverage: a column can be 100% populated and
 entirely wrong.
+
+## Guides
+
+- [How to scrape Google Play: step-by-step guide](https://2captcha.com/h/how-to-scrape-google-play)
+- [How to run the 2scraper scrapers: setup, proxies, exit codes and access modes](https://2captcha.com/h/how-to-run-2scraper-open-source-scrapers) — installation, `.env`, `.meta.json` for the whole family.
+
+## Related scrapers
+
+Same CLI conventions, same output contract (one row per item, JSON or CSV, a `.meta.json` sidecar and shared exit codes):
+
+- [Better Business Bureau scraper](https://github.com/2scraper/bbb-scraper) — BBB search and category listings with no key or proxy, plus…
+- [Flippa scraper](https://github.com/2scraper/flippa-scraper) — Online businesses for sale on Flippa
+- [G2 scraper](https://github.com/2scraper/g2-scraper) — Categories, product pages and pricing pages
+- [Just Join IT scraper](https://github.com/2scraper/justjoin-scraper) — Polish IT job offers with real salaries, seniority, skill…
+- [Mercor scraper](https://github.com/2scraper/mercor-scraper) — AI-talent marketplace: contract roles, rates, eligibility…
+- [Wellfound scraper](https://github.com/2scraper/wellfound-scraper) — Startup jobs from Wellfound with salary and equity ranges…
+
+All scrapers: [github.com/2scraper](https://github.com/2scraper) · Need another site? [Open a request](https://github.com/2scraper/.github/issues/new?title=%5BScraper%20request%5D%20)
 
 ## Licence
 
